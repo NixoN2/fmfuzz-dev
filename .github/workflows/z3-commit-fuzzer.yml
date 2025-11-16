@@ -301,11 +301,11 @@ jobs:
         working-directory: z3
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
-          MAX_JOBS: 10
+          MAX_JOBS: 9
           Z3_COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
         run: |
           # Run commit fuzzer with matrix output (1 commit instead of 50)
-          # Start with 10 jobs max (for testing)
+          # Max 9 jobs per solver (18 total for both z3 and cvc5) to leave space for building and management
           # Tests per job is calculated dynamically to fit within MAX_JOBS
           # To scale: change MAX_JOBS to 200+ (will automatically adjust tests_per_job)
           ${{ github.workspace }}/scripts/z3/commit_fuzzer/run_prepare_commit_fuzzer.sh \
