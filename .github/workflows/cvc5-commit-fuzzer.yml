@@ -53,10 +53,11 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
-            echo "🔨 Adding provided commit to fuzzing schedule: ${{ inputs.cvc5_commit_hash }}"
-            python scripts/scheduling/s3_state.py cvc5 fuzzing-schedule add ${{ inputs.cvc5_commit_hash }}
+            COMMIT_HASH="${{ inputs.cvc5_commit_hash }}"
+            echo "🔨 Adding provided commit to fuzzing schedule: $COMMIT_HASH"
+            python scripts/scheduling/s3_state.py cvc5 fuzzing-schedule add "$COMMIT_HASH"
             echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
-            echo "sha=${{ inputs.cvc5_commit_hash }}" >> $GITHUB_OUTPUT
+            echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
             echo "is_manual_run=true" >> $GITHUB_OUTPUT
             echo "binary_available=true" >> $GITHUB_OUTPUT
           else
