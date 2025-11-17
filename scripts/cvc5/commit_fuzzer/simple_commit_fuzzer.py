@@ -23,7 +23,7 @@ class SimpleCommitFuzzer:
     
     RESOURCE_CONFIG = {
         'cpu_warning': 85.0,
-        'cpu_critical': 50.0,  # Temporarily lowered to 50% for testing CPU usage
+        'cpu_critical': 95.0,
         'memory_warning': 80.0,
         'memory_critical': 90.0,
         'check_interval': 2,  # Check more frequently (every 2 seconds instead of 5)
@@ -151,6 +151,8 @@ class SimpleCommitFuzzer:
                         self._handle_critical_resources(cpu_percent, max_cpu, avg_cpu, memory_percent, memory.total, memory.used)
                     elif status == 'warning':
                         self._handle_warning_resources()
+                        # Also log CPU breakdown on warnings to see what's using CPU
+                        self._log_cpu_usage_by_process_type()
                     
                 except (ImportError, AttributeError) as e:
                     print(f"[WARN] psutil not available, skipping resource monitoring: {e}", file=sys.stderr)
@@ -166,6 +168,94 @@ class SimpleCommitFuzzer:
             gc.collect()
         except Exception:
             pass
+    
+    def _log_cpu_usage_by_process_type(self):
+        """Log CPU usage breakdown by process type (typefuzz, z3, cvc5, python)"""
+        try:
+            main_pid = os.getpid()
+            worker_pids = set()
+            if hasattr(self, 'workers'):
+                for w in self.workers:
+                    try:
+                        worker_pids.add(w.pid)
+                    except (AttributeError, ValueError):
+                        pass
+            
+            process_stats = {
+                'typefuzz': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
+                'z3': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
+                'cvc5': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
+                'python': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
+                'other': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
+            }
+            
+            for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'ppid', 'cmdline']):
+                try:
+                    proc_info = proc.info
+                    proc_obj = psutil.Process(proc_info['pid'])
+                    
+                    # Check if this is a child process of our workers or main process
+                    is_child = False
+                    try:
+                        parent = psutil.Process(proc_info['ppid'])
+                        if parent.pid == main_pid or parent.pid in worker_pids:
+                            is_child = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                    
+                    # Also check if it's one of our worker processes
+                    if proc_info['pid'] in worker_pids or proc_info['pid'] == main_pid:
+                        is_child = True
+                    
+                    if not is_child:
+                        continue
+                    
+                    # Get CPU percent (non-blocking, returns 0.0 if called too quickly)
+                    try:
+                        cpu_pct = proc_obj.cpu_percent(interval=None)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        cpu_pct = 0.0
+                    
+                    rss_mb = proc_info['memory_info'].rss / (1024 * 1024) if proc_info.get('memory_info') else 0.0
+                    cmdline = ' '.join(proc_info.get('cmdline', [])) if proc_info.get('cmdline') else ''
+                    name = proc_info.get('name', '').lower()
+                    
+                    # Categorize process
+                    if 'typefuzz' in cmdline.lower() or 'typefuzz' in name:
+                        process_stats['typefuzz']['count'] += 1
+                        process_stats['typefuzz']['cpu_total'] += cpu_pct
+                        process_stats['typefuzz']['memory_total_mb'] += rss_mb
+                    elif 'z3' in cmdline.lower() or 'z3' in name:
+                        process_stats['z3']['count'] += 1
+                        process_stats['z3']['cpu_total'] += cpu_pct
+                        process_stats['z3']['memory_total_mb'] += rss_mb
+                    elif 'cvc5' in cmdline.lower() or 'cvc5' in name:
+                        process_stats['cvc5']['count'] += 1
+                        process_stats['cvc5']['cpu_total'] += cpu_pct
+                        process_stats['cvc5']['memory_total_mb'] += rss_mb
+                    elif 'python' in name or 'python' in cmdline.lower():
+                        process_stats['python']['count'] += 1
+                        process_stats['python']['cpu_total'] += cpu_pct
+                        process_stats['python']['memory_total_mb'] += rss_mb
+                    else:
+                        process_stats['other']['count'] += 1
+                        process_stats['other']['cpu_total'] += cpu_pct
+                        process_stats['other']['memory_total_mb'] += rss_mb
+                        
+                except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, AttributeError):
+                    pass
+            
+            # Log the breakdown
+            print(f"[RESOURCE] CPU usage by process type:", file=sys.stderr)
+            total_cpu = 0.0
+            for proc_type, stats in process_stats.items():
+                if stats['count'] > 0:
+                    print(f"  {proc_type}: {stats['count']} process(es), {stats['cpu_total']:.1f}% CPU, {stats['memory_total_mb']:.1f} MB", file=sys.stderr)
+                    total_cpu += stats['cpu_total']
+            print(f"  Total tracked: {total_cpu:.1f}% CPU", file=sys.stderr)
+            
+        except Exception as e:
+            print(f"[WARN] Error logging CPU usage by process type: {e}", file=sys.stderr)
     
     def _handle_critical_resources(self, cpu_percent: List[float], max_cpu: float, avg_cpu: float, memory_percent: float, memory_total: int, memory_used: int):
         try:
@@ -183,6 +273,9 @@ class SimpleCommitFuzzer:
                 print(f"[RESOURCE] Critical resource usage detected - {', '.join(issues)} - taking action", file=sys.stderr)
             else:
                 print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, {max_cpu:.1f}% max, Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB) - taking action", file=sys.stderr)
+            
+            # Log CPU usage breakdown by process type
+            self._log_cpu_usage_by_process_type()
         except Exception as e:
             print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, Memory: {memory_percent:.1f}% - taking action (error formatting details: {e})", file=sys.stderr)
         
