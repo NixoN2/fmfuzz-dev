@@ -24,8 +24,10 @@ class SimpleCommitFuzzer:
     RESOURCE_CONFIG = {
         'cpu_warning': 85.0,
         'cpu_critical': 95.0,
-        'memory_warning': 80.0,
-        'memory_critical': 90.0,
+        'memory_warning_percent': 80.0,  # Legacy: for logging only
+        'memory_critical_percent': 90.0,  # Legacy: for logging only
+        'memory_warning_available_gb': 2.0,  # Warning if less than 2GB available
+        'memory_critical_available_gb': 0.5,  # Critical if less than 500MB available (real low memory)
         'check_interval': 2,  # Check more frequently (every 2 seconds instead of 5)
         'pause_duration': 10,
         'max_process_memory_mb': 500,
@@ -124,22 +126,26 @@ class SimpleCommitFuzzer:
                     cpu_percent = psutil.cpu_percent(interval=1, percpu=True)
                     memory = psutil.virtual_memory()
                     memory_percent = memory.percent
+                    memory_available_gb = memory.available / (1024**3)  # Real available memory (excludes cache/buffers)
                     
                     max_cpu = max(cpu_percent) if cpu_percent else 0.0
                     avg_cpu = sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0.0
                     
                     status = 'normal'
                     
+                    # Use available memory (not percent) to detect real memory pressure
+                    # On Linux, memory.percent includes cache/buffers which can be misleading
                     if (avg_cpu >= self.RESOURCE_CONFIG['cpu_critical'] or 
-                        memory_percent >= self.RESOURCE_CONFIG['memory_critical']):
+                        memory_available_gb < self.RESOURCE_CONFIG['memory_critical_available_gb']):
                         status = 'critical'
                     elif (avg_cpu >= self.RESOURCE_CONFIG['cpu_warning'] or 
-                          memory_percent >= self.RESOURCE_CONFIG['memory_warning']):
+                          memory_available_gb < self.RESOURCE_CONFIG['memory_warning_available_gb']):
                         status = 'warning'
                     
                     with self.resource_lock:
                         self.resource_state['cpu_percent'] = cpu_percent
                         self.resource_state['memory_percent'] = memory_percent
+                        self.resource_state['memory_available_gb'] = memory_available_gb
                         self.resource_state['status'] = status
                         self.resource_state['last_update'] = time.time()
                         self.resource_state['max_cpu'] = max_cpu
@@ -148,7 +154,7 @@ class SimpleCommitFuzzer:
                         self.resource_state['memory_used_gb'] = memory.used / (1024**3)
                     
                     if status == 'critical':
-                        self._handle_critical_resources(cpu_percent, max_cpu, avg_cpu, memory_percent, memory.total, memory.used)
+                        self._handle_critical_resources(cpu_percent, max_cpu, avg_cpu, memory_percent, memory_available_gb, memory.total, memory.used)
                     elif status == 'warning':
                         self._handle_warning_resources()
                         # Also log CPU breakdown on warnings to see what's using CPU
@@ -169,6 +175,20 @@ class SimpleCommitFuzzer:
         except Exception:
             pass
     
+    def _get_all_descendant_pids(self, pid):
+        """Recursively get all descendant PIDs of a process"""
+        descendant_pids = set()
+        try:
+            proc = psutil.Process(pid)
+            for child in proc.children(recursive=True):
+                try:
+                    descendant_pids.add(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        return descendant_pids
+    
     def _log_cpu_usage_by_process_type(self):
         """Log CPU usage breakdown by process type (typefuzz, z3, cvc5, python)"""
         try:
@@ -181,6 +201,12 @@ class SimpleCommitFuzzer:
                     except (AttributeError, ValueError):
                         pass
             
+            # Build set of all PIDs we should track (main, workers, and all their descendants)
+            tracked_pids = {main_pid}
+            tracked_pids.update(worker_pids)
+            for pid in list(tracked_pids):
+                tracked_pids.update(self._get_all_descendant_pids(pid))
+            
             process_stats = {
                 'typefuzz': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
                 'z3': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
@@ -189,36 +215,37 @@ class SimpleCommitFuzzer:
                 'other': {'count': 0, 'cpu_total': 0.0, 'memory_total_mb': 0.0},
             }
             
-            for proc in psutil.process_iter(['pid', 'name', 'memory_info', 'ppid', 'cmdline']):
+            # First pass: get CPU percent (need to call it once to initialize, then wait a bit)
+            cpu_cache = {}
+            for pid in tracked_pids:
                 try:
-                    proc_info = proc.info
-                    proc_obj = psutil.Process(proc_info['pid'])
+                    proc = psutil.Process(pid)
+                    proc.cpu_percent()  # Initialize CPU tracking
+                    cpu_cache[pid] = proc
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            
+            # Wait a short time for CPU percent to be calculated
+            time.sleep(0.1)
+            
+            # Second pass: collect actual stats
+            for pid in tracked_pids:
+                try:
+                    proc = cpu_cache.get(pid)
+                    if not proc:
+                        proc = psutil.Process(pid)
                     
-                    # Check if this is a child process of our workers or main process
-                    is_child = False
+                    proc_info = proc.as_dict(['name', 'memory_info', 'cmdline'])
+                    
+                    # Get CPU percent (now should have a value)
                     try:
-                        parent = psutil.Process(proc_info['ppid'])
-                        if parent.pid == main_pid or parent.pid in worker_pids:
-                            is_child = True
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                    
-                    # Also check if it's one of our worker processes
-                    if proc_info['pid'] in worker_pids or proc_info['pid'] == main_pid:
-                        is_child = True
-                    
-                    if not is_child:
-                        continue
-                    
-                    # Get CPU percent (non-blocking, returns 0.0 if called too quickly)
-                    try:
-                        cpu_pct = proc_obj.cpu_percent(interval=None)
+                        cpu_pct = proc.cpu_percent(interval=None)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         cpu_pct = 0.0
                     
-                    rss_mb = proc_info['memory_info'].rss / (1024 * 1024) if proc_info.get('memory_info') else 0.0
+                    rss_mb = proc_info.get('memory_info', {}).rss / (1024 * 1024) if proc_info.get('memory_info') else 0.0
                     cmdline = ' '.join(proc_info.get('cmdline', [])) if proc_info.get('cmdline') else ''
-                    name = proc_info.get('name', '').lower()
+                    name = (proc_info.get('name') or '').lower()
                     
                     # Categorize process
                     if 'typefuzz' in cmdline.lower() or 'typefuzz' in name:
@@ -245,6 +272,11 @@ class SimpleCommitFuzzer:
                 except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, AttributeError):
                     pass
             
+            # Get system memory for comparison
+            memory = psutil.virtual_memory()
+            system_memory_used_gb = memory.used / (1024**3)
+            tracked_memory_mb = sum(stats['memory_total_mb'] for stats in process_stats.values())
+            
             # Log the breakdown
             print(f"[RESOURCE] CPU usage by process type:", file=sys.stderr)
             total_cpu = 0.0
@@ -252,12 +284,14 @@ class SimpleCommitFuzzer:
                 if stats['count'] > 0:
                     print(f"  {proc_type}: {stats['count']} process(es), {stats['cpu_total']:.1f}% CPU, {stats['memory_total_mb']:.1f} MB", file=sys.stderr)
                     total_cpu += stats['cpu_total']
-            print(f"  Total tracked: {total_cpu:.1f}% CPU", file=sys.stderr)
+            print(f"  Total tracked: {total_cpu:.1f}% CPU, {tracked_memory_mb:.1f} MB", file=sys.stderr)
+            print(f"  System total: {system_memory_used_gb:.2f} GB used ({memory.percent:.1f}%)", file=sys.stderr)
+            print(f"  Memory gap: {system_memory_used_gb * 1024 - tracked_memory_mb:.1f} MB not tracked (likely other system processes)", file=sys.stderr)
             
         except Exception as e:
             print(f"[WARN] Error logging CPU usage by process type: {e}", file=sys.stderr)
     
-    def _handle_critical_resources(self, cpu_percent: List[float], max_cpu: float, avg_cpu: float, memory_percent: float, memory_total: int, memory_used: int):
+    def _handle_critical_resources(self, cpu_percent: List[float], max_cpu: float, avg_cpu: float, memory_percent: float, memory_available_gb: float, memory_total: int, memory_used: int):
         try:
             memory_total_gb = memory_total / (1024**3)
             memory_used_gb = memory_used / (1024**3)
@@ -266,21 +300,21 @@ class SimpleCommitFuzzer:
             if avg_cpu >= self.RESOURCE_CONFIG['cpu_critical']:
                 cpu_details = ", ".join([f"core{i+1}:{p:.1f}%" for i, p in enumerate(cpu_percent)])
                 issues.append(f"CPU: {avg_cpu:.1f}% avg, {max_cpu:.1f}% max ({cpu_details}, critical: {self.RESOURCE_CONFIG['cpu_critical']}%)")
-            if memory_percent >= self.RESOURCE_CONFIG['memory_critical']:
-                issues.append(f"Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB, critical: {self.RESOURCE_CONFIG['memory_critical']}%)")
+            if memory_available_gb < self.RESOURCE_CONFIG['memory_critical_available_gb']:
+                issues.append(f"Memory: {memory_available_gb:.2f}GB available (critical threshold: {self.RESOURCE_CONFIG['memory_critical_available_gb']}GB) - {memory_percent:.1f}% used ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB)")
             
             if issues:
                 print(f"[RESOURCE] Critical resource usage detected - {', '.join(issues)} - taking action", file=sys.stderr)
             else:
-                print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, {max_cpu:.1f}% max, Memory: {memory_percent:.1f}% ({memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB) - taking action", file=sys.stderr)
+                print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, {max_cpu:.1f}% max, Memory: {memory_available_gb:.2f}GB available ({memory_percent:.1f}% used, {memory_used_gb:.2f}GB / {memory_total_gb:.2f}GB) - taking action", file=sys.stderr)
             
             # Log CPU usage breakdown by process type
             self._log_cpu_usage_by_process_type()
         except Exception as e:
-            print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, Memory: {memory_percent:.1f}% - taking action (error formatting details: {e})", file=sys.stderr)
+            print(f"[RESOURCE] Critical resource usage detected - CPU: {avg_cpu:.1f}% avg, Memory available: {memory_available_gb:.2f}GB - taking action (error formatting details: {e})", file=sys.stderr)
         
-        # If memory is critical, stop immediately to preserve bugs
-        if memory_percent >= self.RESOURCE_CONFIG['memory_critical']:
+        # If memory is critical (low available), stop immediately to preserve bugs
+        if memory_available_gb < self.RESOURCE_CONFIG['memory_critical_available_gb']:
             self._log_bugs_summary_and_stop()
             return
         
