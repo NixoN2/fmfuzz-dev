@@ -24,14 +24,12 @@ class SimpleCommitFuzzer:
     RESOURCE_CONFIG = {
         'cpu_warning': 85.0,
         'cpu_critical': 95.0,
-        'memory_warning_percent': 80.0,  # Legacy: for logging only
-        'memory_critical_percent': 90.0,  # Legacy: for logging only
         'memory_warning_available_gb': 2.0,  # Warning if less than 2GB available
         'memory_critical_available_gb': 0.5,  # Critical if less than 500MB available (real low memory)
-        'check_interval': 2,  # Check more frequently (every 2 seconds instead of 5)
+        'check_interval': 2,  # Check every 2 seconds
         'pause_duration': 10,
-        'max_process_memory_mb': 300,  # Lowered from 500MB to catch runaway processes earlier
-        'max_process_memory_mb_warning': 200,  # Even lower threshold when memory is getting low
+        'max_process_memory_mb': 500,  # Kill processes exceeding 500MB (normal operation)
+        'max_process_memory_mb_warning': 300,  # Stricter threshold (300MB) when memory is low
     }
     
     def __init__(
@@ -154,20 +152,18 @@ class SimpleCommitFuzzer:
                         self.resource_state['memory_total_gb'] = memory.total / (1024**3)
                         self.resource_state['memory_used_gb'] = memory.used / (1024**3)
                     
-                    # Always check and kill high memory processes, but use different thresholds
-                    # based on memory pressure
-                    if memory_available_gb < self.RESOURCE_CONFIG['memory_warning_available_gb']:
-                        # Memory is getting low - use stricter threshold
-                        self._kill_high_memory_processes(threshold_mb=self.RESOURCE_CONFIG['max_process_memory_mb_warning'])
-                    else:
-                        # Normal operation - use standard threshold
-                        self._kill_high_memory_processes(threshold_mb=self.RESOURCE_CONFIG['max_process_memory_mb'])
+                    # Proactively kill high memory processes every cycle to catch orphaned processes
+                    # Use adaptive threshold: stricter when memory is low
+                    threshold = (self.RESOURCE_CONFIG['max_process_memory_mb_warning'] 
+                                if memory_available_gb < self.RESOURCE_CONFIG['memory_warning_available_gb']
+                                else self.RESOURCE_CONFIG['max_process_memory_mb'])
+                    self._kill_high_memory_processes(threshold_mb=threshold)
                     
                     if status == 'critical':
                         self._handle_critical_resources(cpu_percent, max_cpu, avg_cpu, memory_percent, memory_available_gb, memory.total, memory.used)
                     elif status == 'warning':
                         self._handle_warning_resources()
-                        # Also log CPU breakdown on warnings to see what's using CPU
+                        # Log CPU breakdown on warnings to diagnose resource usage
                         self._log_cpu_usage_by_process_type()
                     
                 except (ImportError, AttributeError) as e:
@@ -179,17 +175,18 @@ class SimpleCommitFuzzer:
                 print(f"[WARN] Error in resource monitoring: {e}", file=sys.stderr)
                 time.sleep(self.RESOURCE_CONFIG['check_interval'])
     
-    def _kill_high_memory_processes(self, threshold_mb: Optional[float] = None, context: str = ""):
-        """Kill processes that exceed memory threshold using recursive descendant tracking.
+    def _kill_high_memory_processes(self, threshold_mb: Optional[float] = None):
+        """Kill processes exceeding memory threshold using recursive descendant tracking.
+        Catches orphaned solver processes that typefuzz doesn't clean up properly.
         
         Args:
             threshold_mb: Memory threshold in MB (defaults to max_process_memory_mb)
-            context: Context string for logging (e.g., "WARNING", "CRITICAL")
         """
         if threshold_mb is None:
             threshold_mb = self.RESOURCE_CONFIG['max_process_memory_mb']
         
         try:
+            # Get all tracked PIDs (main, workers, and all descendants)
             main_pid = os.getpid()
             worker_pids = set()
             if hasattr(self, 'workers'):
@@ -199,7 +196,6 @@ class SimpleCommitFuzzer:
                     except (AttributeError, ValueError):
                         pass
             
-            # Build set of all PIDs we should track (main, workers, and all their descendants)
             tracked_pids = {main_pid}
             tracked_pids.update(worker_pids)
             for pid in list(tracked_pids):
@@ -209,38 +205,27 @@ class SimpleCommitFuzzer:
             for pid in tracked_pids:
                 try:
                     proc = psutil.Process(pid)
-                    proc_info = proc.as_dict(['name', 'memory_info', 'cmdline'])
-                    rss_mb = proc_info.get('memory_info', {}).rss / (1024 * 1024) if proc_info.get('memory_info') else 0.0
+                    rss_mb = proc.memory_info().rss / (1024 * 1024)
                     
                     if rss_mb > threshold_mb:
-                        cmdline = ' '.join(proc_info.get('cmdline', [])) if proc_info.get('cmdline') else ''
-                        name = proc_info.get('name', 'unknown')
-                        context_str = f"[{context}] " if context else ""
-                        print(f"[RESOURCE] {context_str}Killing process {pid} ({name}) using {rss_mb:.1f}MB (threshold: {threshold_mb}MB)", file=sys.stderr)
-                        if cmdline:
-                            print(f"  Command: {cmdline[:200]}", file=sys.stderr)
-                        try:
-                            proc.kill()
-                            killed_count += 1
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
+                        name = proc.name()
+                        cmdline = ' '.join(proc.cmdline()[:3])  # First 3 args for brevity
+                        print(f"[RESOURCE] Killing process {pid} ({name}) using {rss_mb:.1f}MB (threshold: {threshold_mb}MB)", file=sys.stderr)
+                        print(f"  Command: {cmdline}...", file=sys.stderr)
+                        proc.kill()
+                        killed_count += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, AttributeError):
                     pass
             
             if killed_count > 0:
-                context_str = f"[{context}] " if context else ""
-                print(f"[RESOURCE] {context_str}Killed {killed_count} process(es) exceeding memory threshold ({threshold_mb}MB)", file=sys.stderr)
+                print(f"[RESOURCE] Killed {killed_count} process(es) exceeding {threshold_mb}MB threshold", file=sys.stderr)
         except Exception as e:
             print(f"[WARN] Error killing high memory processes: {e}", file=sys.stderr)
     
     def _handle_warning_resources(self):
-        try:
-            gc.collect()
-        except Exception:
-            pass
-        
-        # Also kill high memory processes on warnings to prevent escalation
-        self._kill_high_memory_processes(context="WARNING")
+        """Handle warning-level resource usage - just log CPU breakdown"""
+        # Process killing already happens every cycle, no need to duplicate here
+        pass
     
     def _get_all_descendant_pids(self, pid):
         """Recursively get all descendant PIDs of a process"""
@@ -393,10 +378,8 @@ class SimpleCommitFuzzer:
         except Exception:
             pass
         
-        # Kill high memory processes using recursive descendant tracking
-        # This catches orphaned solver processes that typefuzz doesn't clean up
-        self._kill_high_memory_processes(context="CRITICAL")
-        
+        # Process killing already happens every cycle, no need to duplicate here
+        # Just pause to let system recover
         time.sleep(self.RESOURCE_CONFIG['pause_duration'])
         
         with self.resource_lock:
