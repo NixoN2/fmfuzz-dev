@@ -944,12 +944,29 @@ class PrepareCommitAnalyzer:
         # Step 3: Find tests for the changed functions
         test_results = self.find_tests_for_functions(changed_functions)
         
-        # Step 4: Check if we have 0 direct matches and files with no functions detected
-        # If so, fallback to all tests
+        # Step 4: Check if we should fallback to all tests
+        # Fallback conditions:
+        # 1. No direct matches AND files with no functions detected, OR
+        # 2. No functions have tests mapped (coverage = 0%), OR
+        # 3. No tests found at all
+        should_fallback = False
+        fallback_reason = ""
+        
         if test_results['direct_matches'] == 0 and files_with_no_functions:
-            print(f"Warning: {len(files_with_no_functions)} .cpp/.hpp file(s) changed but no functions detected:")
-            for f in files_with_no_functions:
-                print(f"  - {f}")
+            should_fallback = True
+            fallback_reason = f"{len(files_with_no_functions)} .cpp/.hpp file(s) changed but no functions detected"
+        elif test_results['functions_with_tests'] == 0 and changed_functions:
+            should_fallback = True
+            fallback_reason = f"No tests mapped to {len(changed_functions)} changed function(s) (coverage = 0%)"
+        elif test_results['total_tests'] == 0:
+            should_fallback = True
+            fallback_reason = "No tests found in coverage mapping"
+        
+        if should_fallback:
+            print(f"Warning: {fallback_reason}")
+            if files_with_no_functions:
+                for f in files_with_no_functions:
+                    print(f"  - {f}")
             print(f"No direct matches found ({test_results['direct_matches']} direct matches).")
             print("Including all tests from coverage mapping as fallback.")
             all_tests = self.get_all_tests_from_coverage()

@@ -11,42 +11,68 @@ on:
     - cron: '0 0 1 * *'  # Run on the 1st of every month at midnight UTC (approximately every 30 days)
 
 jobs:
+  discover-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+      total_tests: ${{ steps.generate-matrix.outputs.total_tests }}
+      total_jobs: ${{ steps.generate-matrix.outputs.total_jobs }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Checkout CVC5 specific commit if provided
+        if: inputs.cvc5_commit_hash != ''
+        run: |
+          if [ -d "cvc5" ]; then
+            cd cvc5
+            git fetch origin
+            git checkout ${{ inputs.cvc5_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          else
+            git clone https://github.com/cvc5/cvc5.git cvc5
+            cd cvc5
+            git checkout ${{ inputs.cvc5_commit_hash }}
+            echo "Checked out commit: $(git rev-parse HEAD)"
+          fi
+      
+      - name: Build CVC5 with coverage
+        run: |
+          ./scripts/cvc5/build.sh --coverage
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Generate dynamic matrix
+        id: generate-matrix
+        run: |
+          python3 scripts/cvc5/coverage/generate_matrix.py \
+            --build-dir cvc5/build \
+            --max-job-time 360 \
+            --test-timeout 2 \
+            --buffer 60 \
+            --output matrix.json
+          
+          MATRIX=$(jq -c '.matrix' matrix.json)
+          TOTAL_TESTS=$(jq -r '.total_tests' matrix.json)
+          TOTAL_JOBS=$(jq -r '.total_jobs' matrix.json)
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+          
+          echo "✅ Generated matrix with $TOTAL_JOBS jobs for $TOTAL_TESTS tests"
+          cat matrix.json
+
   coverage-analysis:
+    needs: discover-tests
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - job_name: regress0a
-            start_index: 1
-            end_index: 602
-          - job_name: regress0b
-            start_index: 603
-            end_index: 1204
-          - job_name: regress0c
-            start_index: 1205
-            end_index: 1806
-          - job_name: regress0d
-            start_index: 1807
-            end_index: 2408
-          - job_name: regress1a
-            start_index: 2409
-            end_index: 2888
-          - job_name: regress1b
-            start_index: 2889
-            end_index: 3368
-          - job_name: regress1c
-            start_index: 3369
-            end_index: 3850
-          - job_name: regress2
-            start_index: 3851
-            end_index: 3993
-          - job_name: regress3
-            start_index: 3994
-            end_index: 4044
-          - job_name: regress4
-            start_index: 4045
-            end_index: 4054
+      matrix: ${{ fromJson(needs.discover-tests.outputs.matrix) }}
     
     steps:
       - name: Checkout
@@ -85,7 +111,7 @@ jobs:
   # Join all coverage mappings and create final artifact
   join-mappings:
     runs-on: ubuntu-latest
-    needs: [coverage-analysis]
+    needs: [discover-tests, coverage-analysis]
     
     steps:
       - name: Checkout

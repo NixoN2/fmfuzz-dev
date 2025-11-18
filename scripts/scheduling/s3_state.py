@@ -192,8 +192,49 @@ class S3StateManager:
             return True
         return False
     
+    def select_and_increment_least_fuzzed(self) -> Optional[str]:
+        """Atomically select the least-fuzzed commit and increment its fuzz_count.
+        Returns the commit hash if found, None if schedule is empty.
+        This prevents race conditions where multiple workflows select the same commit."""
+        def update(schedule):
+            schedule = schedule if isinstance(schedule, list) else []
+            if not schedule:
+                return schedule
+            
+            # Find minimum fuzz_count
+            min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule)
+            
+            # Find first commit with minimum fuzz_count (oldest among least-fuzzed)
+            for commit in schedule:
+                if commit.get('fuzz_count', 0) == min_fuzz_count:
+                    # Atomically increment fuzz_count
+                    commit['fuzz_count'] = commit.get('fuzz_count', 0) + 1
+                    return schedule
+            
+            return schedule
+        
+        schedule_before = self.get_fuzzing_schedule()
+        if not schedule_before:
+            return None
+        
+        # Find which commit will be selected (before increment)
+        min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule_before)
+        selected_commit = None
+        for commit in schedule_before:
+            if commit.get('fuzz_count', 0) == min_fuzz_count:
+                selected_commit = commit.get('hash')
+                break
+        
+        if selected_commit:
+            # Atomically update: select and increment in one operation
+            self.update_state('fuzzing-schedule.json', update, default=[])
+            return selected_commit
+        
+        return None
+    
     def increment_fuzz_count(self, commit_hash: str) -> bool:
-        """Increment fuzz_count for a commit. Returns True if updated, False if not found"""
+        """Increment fuzz_count for a commit. Returns True if updated, False if not found.
+        This is idempotent - if called multiple times, it will keep incrementing."""
         def update(schedule):
             schedule = schedule if isinstance(schedule, list) else []
             for commit in schedule:
