@@ -44,7 +44,7 @@ jobs:
           cd cvc5
           mkdir -p build
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake .. -DCMAKE_BUILD_TYPE=Production
       
       - name: Set up Python
         uses: actions/setup-python@v5
