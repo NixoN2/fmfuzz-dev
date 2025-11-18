@@ -13,7 +13,9 @@ from scheduling.s3_state import get_state_manager, S3StateError
 
 def get_least_fuzzed_commit(solver: str) -> Optional[str]:
     """Get the least-fuzzed commit from fuzzing schedule. Returns None if schedule is empty.
-    When all commits have the same fuzz_count, returns the oldest (first in list)."""
+    When all commits have the same fuzz_count, returns the oldest (first in list).
+    
+    NOTE: This is a read-only operation. For atomic selection with increment, use select_and_increment_least_fuzzed."""
     manager = get_state_manager(solver)
     schedule = manager.get_fuzzing_schedule()
     
@@ -33,20 +35,35 @@ def get_least_fuzzed_commit(solver: str) -> Optional[str]:
 
 
 def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
-    """Increment fuzz count for a commit and manage schedule size.
-    If schedule > 4 and all commits are unfuzzed, remove the commit we just fuzzed."""
+    """Manage schedule size after fuzzing completes.
+    If schedule > 4 and all commits are unfuzzed, remove the commit we just fuzzed.
+    
+    NOTE: fuzz_count is now incremented atomically during selection (in run_fuzzer),
+    so we don't increment it again here. This function only handles schedule management."""
     manager = get_state_manager(solver)
     
-    # Increment fuzz count
-    manager.increment_fuzz_count(commit_hash)
-    print(f"✅ Incremented fuzz count for {commit_hash[:8]}")
+    # Verify commit exists in schedule
+    schedule = manager.get_fuzzing_schedule()
+    commit_found = any(c.get('hash') == commit_hash for c in schedule)
+    
+    if not commit_found:
+        print(f"⚠️  Commit {commit_hash[:8]} not found in schedule (may have been removed)", file=sys.stderr)
+        return
+    
+    # Get current fuzz_count for logging
+    current_fuzz_count = None
+    for commit in schedule:
+        if commit.get('hash') == commit_hash:
+            current_fuzz_count = commit.get('fuzz_count', 0)
+            break
+    
+    print(f"✅ Fuzzing completed for {commit_hash[:8]} (fuzz_count: {current_fuzz_count})")
     
     # Check schedule size and manage if needed
-    schedule = manager.get_fuzzing_schedule()
     schedule_size = len(schedule)
     
     if schedule_size > 4:
-        # Check if all commits are unfuzzed (fuzz_count <= 1, since we just incremented)
+        # Check if all commits are unfuzzed (fuzz_count <= 1)
         all_unfuzzed = all(c.get('fuzz_count', 0) <= 1 for c in schedule)
         
         if all_unfuzzed:
@@ -56,9 +73,15 @@ def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
 
 
 def run_fuzzer(solver: str, verify_binary: bool = True) -> Optional[str]:
-    """Run fuzzer check - returns commit hash if available and binary exists, None otherwise."""
+    """Run fuzzer check - atomically selects and increments fuzz_count for the least-fuzzed commit.
+    Returns commit hash if available and binary exists, None otherwise.
+    
+    This atomic operation prevents race conditions where multiple workflows select the same commit."""
     try:
-        commit = get_least_fuzzed_commit(solver)
+        manager = get_state_manager(solver)
+        
+        # Atomically select and increment the least-fuzzed commit
+        commit = manager.select_and_increment_least_fuzzed()
         if not commit:
             print("⏭️  No commits in fuzzing schedule", file=sys.stderr)
             return None
@@ -66,7 +89,6 @@ def run_fuzzer(solver: str, verify_binary: bool = True) -> Optional[str]:
         if verify_binary:
             from botocore.exceptions import ClientError
             
-            manager = get_state_manager(solver)
             s3_key = f"solvers/{solver}/builds/production/{commit}.tar.gz"
             
             try:
@@ -74,10 +96,12 @@ def run_fuzzer(solver: str, verify_binary: bool = True) -> Optional[str]:
             except ClientError as e:
                 if e.response.get('Error', {}).get('Code') == '404':
                     print(f"⚠️  Binary not found for commit {commit[:8]}, skipping", file=sys.stderr)
+                    # Note: fuzz_count was already incremented, but that's okay - 
+                    # it prevents this commit from being selected again until binary is available
                     return None
                 raise S3StateError(f"Error checking binary existence: {e}")
         
-        print(f"✅ Selected commit {commit[:8]} for fuzzing", file=sys.stderr)
+        print(f"✅ Selected commit {commit[:8]} for fuzzing (fuzz_count incremented)", file=sys.stderr)
         return commit
     except S3StateError as e:
         print(f"❌ S3 State Error: {e}", file=sys.stderr)
