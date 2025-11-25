@@ -267,8 +267,9 @@ jobs:
   mark-as-failed:
     needs: [check-build-queue, build-static, build-static-coverage]
     if: |
-      (needs.build-static.result == 'failure' || needs.build-static-coverage.result == 'failure') &&
-      (needs.build-static.result != 'cancelled' && needs.build-static-coverage.result != 'cancelled')
+      always() &&
+      needs.check-build-queue.result == 'success' &&
+      (needs.build-static.result == 'failure' || needs.build-static-coverage.result == 'failure')
     runs-on: ubuntu-latest
     
     steps:
