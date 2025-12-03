@@ -310,6 +310,82 @@ class S3StateManager:
         """Get fuzzing schedule"""
         return self.read_state('fuzzing-schedule.json', default=[])
     
+    # Fuzzing schedule v2 operations
+    def add_to_fuzzing_schedule_v2(self, commit_hash: str) -> None:
+        """Add commit to fuzzing schedule v2"""
+        def update(schedule):
+            schedule = schedule if isinstance(schedule, list) else []
+            # Check if already exists
+            if not any(c.get('hash') == commit_hash for c in schedule):
+                schedule.append({'hash': commit_hash, 'fuzz_count': 0})
+            return schedule
+        self.update_state('fuzzing-schedulev2.json', update, default=[])
+    
+    def remove_from_fuzzing_schedule_v2(self, commit_hash: str) -> bool:
+        """Remove commit from fuzzing schedule v2. Returns True if removed, False if not found."""
+        def update(schedule):
+            schedule = schedule if isinstance(schedule, list) else []
+            return [c for c in schedule if c.get('hash') != commit_hash]
+        schedule_before = self.get_fuzzing_schedule_v2()
+        self.update_state('fuzzing-schedulev2.json', update, default=[])
+        return any(c.get('hash') == commit_hash for c in schedule_before)
+    
+    def select_and_increment_least_fuzzed_v2(self) -> Optional[str]:
+        """Atomically select least-fuzzed commit from fuzzing schedule v2 and increment its fuzz_count.
+        Returns the commit hash, or None if schedule is empty.
+        When all commits have the same fuzz_count, selects the oldest (first in list)."""
+        def update(schedule):
+            schedule = schedule if isinstance(schedule, list) else []
+            if not schedule:
+                return schedule
+            
+            # Find minimum fuzz_count
+            min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule)
+            
+            # Find first commit with minimum fuzz_count (oldest among least-fuzzed)
+            for commit_info in schedule:
+                if commit_info.get('fuzz_count', 0) == min_fuzz_count:
+                    commit_info['fuzz_count'] = commit_info.get('fuzz_count', 0) + 1
+                    return schedule
+            
+            # Fallback (shouldn't happen)
+            if schedule:
+                schedule[0]['fuzz_count'] = schedule[0].get('fuzz_count', 0) + 1
+            return schedule
+        
+        schedule_before = self.get_fuzzing_schedule_v2()
+        if not schedule_before:
+            return None
+        
+        self.update_state('fuzzing-schedulev2.json', update, default=[])
+        
+        # Find which commit was selected (one that had min fuzz_count before update)
+        min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule_before)
+        for commit_info in schedule_before:
+            if commit_info.get('fuzz_count', 0) == min_fuzz_count:
+                selected_commit = commit_info.get('hash')
+                return selected_commit
+        
+        return None
+    
+    def increment_fuzz_count_v2(self, commit_hash: str) -> bool:
+        """Increment fuzz_count for a commit in fuzzing schedule v2. Returns True if updated, False if not found.
+        This is idempotent - if called multiple times, it will keep incrementing."""
+        def update(schedule):
+            schedule = schedule if isinstance(schedule, list) else []
+            for commit in schedule:
+                if commit.get('hash') == commit_hash:
+                    commit['fuzz_count'] = commit.get('fuzz_count', 0) + 1
+                    return schedule
+            return schedule
+        schedule_before = self.get_fuzzing_schedule_v2()
+        self.update_state('fuzzing-schedulev2.json', update, default=[])
+        return any(c.get('hash') == commit_hash for c in schedule_before)
+    
+    def get_fuzzing_schedule_v2(self) -> list:
+        """Get fuzzing schedule v2"""
+        return self.read_state('fuzzing-schedulev2.json', default=[])
+    
     # State operations
     def update_last_checked_commit(self, commit_hash: str) -> None:
         """Update last checked commit in state.json"""
@@ -318,6 +394,16 @@ class S3StateManager:
     def get_last_checked_commit(self) -> Optional[str]:
         """Get last checked commit from state.json"""
         state = self.read_state('state.json', default={'last_checked_commit': None})
+        return state.get('last_checked_commit')
+    
+    # State v2 operations
+    def update_last_checked_commit_v2(self, commit_hash: str) -> None:
+        """Update last checked commit in statev2.json"""
+        self.update_state('statev2.json', lambda s: {'last_checked_commit': commit_hash}, default={'last_checked_commit': None})
+    
+    def get_last_checked_commit_v2(self) -> Optional[str]:
+        """Get last checked commit from statev2.json"""
+        state = self.read_state('statev2.json', default={'last_checked_commit': None})
         return state.get('last_checked_commit')
     
     def get_latest_available_build(self) -> Optional[str]:
@@ -415,6 +501,18 @@ if __name__ == '__main__':
     p.add_argument('commit', help='Commit hash')
     fuzzing_sub.add_parser('get', help='Get fuzzing schedule')
     
+    # Fuzzing schedule v2 commands
+    fuzzing_v2_parser = subparsers.add_parser('fuzzing-schedule-v2', help='Fuzzing schedule v2 operations')
+    fuzzing_v2_sub = fuzzing_v2_parser.add_subparsers(dest='action')
+    
+    p = fuzzing_v2_sub.add_parser('add', help='Add commit to fuzzing schedule v2')
+    p.add_argument('commit', help='Commit hash')
+    p = fuzzing_v2_sub.add_parser('remove', help='Remove commit from fuzzing schedule v2')
+    p.add_argument('commit', help='Commit hash')
+    p = fuzzing_v2_sub.add_parser('increment-fuzz-count', help='Increment fuzz count for commit in v2')
+    p.add_argument('commit', help='Commit hash')
+    fuzzing_v2_sub.add_parser('get', help='Get fuzzing schedule v2')
+    
     # State commands
     state_parser = subparsers.add_parser('state', help='State operations')
     state_sub = state_parser.add_subparsers(dest='action')
@@ -422,6 +520,14 @@ if __name__ == '__main__':
     p = state_sub.add_parser('update-last-checked', help='Update last checked commit')
     p.add_argument('commit', help='Commit hash')
     state_sub.add_parser('get-last-checked', help='Get last checked commit')
+    
+    # State v2 commands
+    state_v2_parser = subparsers.add_parser('state-v2', help='State v2 operations')
+    state_v2_sub = state_v2_parser.add_subparsers(dest='action')
+    
+    p = state_v2_sub.add_parser('update-last-checked', help='Update last checked commit in v2')
+    p.add_argument('commit', help='Commit hash')
+    state_v2_sub.add_parser('get-last-checked', help='Get last checked commit from v2')
     
     # Raw file operations (for debugging)
     raw_parser = subparsers.add_parser('raw', help='Raw file operations')
@@ -512,12 +618,38 @@ if __name__ == '__main__':
                 schedule = manager.get_fuzzing_schedule()
                 print(json.dumps(schedule, indent=2))
         
+        elif args.command == 'fuzzing-schedule-v2':
+            if args.action == 'add':
+                manager.add_to_fuzzing_schedule_v2(args.commit)
+                print(f"✅ Added {args.commit} to fuzzing schedule v2")
+            elif args.action == 'remove':
+                if manager.remove_from_fuzzing_schedule_v2(args.commit):
+                    print(f"✅ Removed {args.commit} from fuzzing schedule v2")
+                else:
+                    print(f"⚠️  {args.commit} not found in fuzzing schedule v2")
+            elif args.action == 'increment-fuzz-count':
+                if manager.increment_fuzz_count_v2(args.commit):
+                    print(f"✅ Incremented fuzz count for {args.commit} in v2")
+                else:
+                    print(f"⚠️  {args.commit} not found in fuzzing schedule v2")
+            elif args.action == 'get':
+                schedule = manager.get_fuzzing_schedule_v2()
+                print(json.dumps(schedule, indent=2))
+        
         elif args.command == 'state':
             if args.action == 'update-last-checked':
                 manager.update_last_checked_commit(args.commit)
                 print(f"✅ Updated last checked commit to {args.commit}")
             elif args.action == 'get-last-checked':
                 commit = manager.get_last_checked_commit()
+                print(commit if commit else "None")
+        
+        elif args.command == 'state-v2':
+            if args.action == 'update-last-checked':
+                manager.update_last_checked_commit_v2(args.commit)
+                print(f"✅ Updated last checked commit to {args.commit} in v2")
+            elif args.action == 'get-last-checked':
+                commit = manager.get_last_checked_commit_v2()
                 print(commit if commit else "None")
         
         elif args.command == 'raw':

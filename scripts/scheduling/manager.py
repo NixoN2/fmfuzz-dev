@@ -66,7 +66,7 @@ def get_commits_from_github(repo_url: str, since_commit: Optional[str] = None, t
 
 def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
     manager = get_state_manager(solver)
-    last_checked = manager.get_last_checked_commit()
+    last_checked = manager.get_last_checked_commit_v2()
     print(f"Last checked commit: {last_checked or 'None'}")
     
     try:
@@ -75,7 +75,7 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
         print(f"❌ Error getting commits: {e}", file=sys.stderr)
         sys.exit(1)
     
-    # Check built commits and move to fuzzing schedule (even if no new commits)
+    # Check built commits and move to fuzzing schedule v2 (even if no new commits)
     built_commits = manager.get_built_commits()
     new_commits_added_to_schedule = []
     if boto3:
@@ -84,10 +84,10 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
             try:
                 s3_key = f"solvers/{solver}/builds/production/{commit}.tar.gz"
                 manager.s3_client.head_object(Bucket=manager.bucket, Key=s3_key)
-                manager.add_to_fuzzing_schedule(commit)
+                manager.add_to_fuzzing_schedule_v2(commit)
                 manager.remove_from_built(commit)
                 new_commits_added_to_schedule.append(commit)
-                print(f"✅ Moved {commit[:8]} to fuzzing schedule")
+                print(f"✅ Moved {commit[:8]} to fuzzing schedule v2")
             except ClientError as e:
                 if e.response.get('Error', {}).get('Code') == '404':
                     print(f"⚠️  Binary not found for {commit[:8]}")
@@ -126,28 +126,28 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
             except Exception as e:
                 print(f"❌ Error adding latest commit to build queue: {e}", file=sys.stderr)
             
-            # Add ALL commits with C++ changes directly to fuzzing schedule
+            # Add ALL commits with C++ changes directly to fuzzing schedule v2
             # Assumption: We'll have time to build latest commit and use it for next fuzzing
             newly_added_commits = set()
             for commit in new_commits_with_cpp:
                 try:
-                    manager.add_to_fuzzing_schedule(commit)
+                    manager.add_to_fuzzing_schedule_v2(commit)
                     newly_added_commits.add(commit)
-                    print(f"✅ Added {commit[:8]} to fuzzing schedule")
+                    print(f"✅ Added {commit[:8]} to fuzzing schedule v2")
                 except Exception as e:
                     print(f"❌ Error adding {commit[:8]} to fuzzing schedule: {e}", file=sys.stderr)
         else:
             newly_added_commits = set()
         
-        manager.update_last_checked_commit(commits[0])
+        manager.update_last_checked_commit_v2(commits[0])
         print(f"✅ Updated last checked commit to {commits[0][:8]}")
     else:
         print("✅ No new commits to check")
         newly_added_commits = set()
     
-    # Clean up commits from fuzzing schedule if binaries are missing (7-day lifecycle)
+    # Clean up commits from fuzzing schedule v2 if binaries are missing (7-day lifecycle)
     # Skip binary check for commits that were just added or are in build queue (being built)
-    schedule = manager.get_fuzzing_schedule()
+    schedule = manager.get_fuzzing_schedule_v2()
     if boto3:
         from botocore.exceptions import ClientError
         commits_to_remove = []
@@ -172,8 +172,8 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                     print(f"⚠️  Binary missing for {commit_hash[:8]}, removing from schedule")
         
         for commit_hash in commits_to_remove:
-            manager.remove_from_fuzzing_schedule(commit_hash)
-        schedule = manager.get_fuzzing_schedule()
+            manager.remove_from_fuzzing_schedule_v2(commit_hash)
+        schedule = manager.get_fuzzing_schedule_v2()
     
     # Manage fuzzing schedule size only when adding new commits
     # If schedule has 4+ commits and we're adding new ones, remove oldest fuzzed commit
@@ -186,7 +186,7 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                 break
         
         if oldest_fuzzed:
-            manager.remove_from_fuzzing_schedule(oldest_fuzzed)
+            manager.remove_from_fuzzing_schedule_v2(oldest_fuzzed)
             print(f"✅ Removed oldest fuzzed commit {oldest_fuzzed[:8]} to make room for new commit")
 
 
