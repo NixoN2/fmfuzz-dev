@@ -45,7 +45,7 @@ jobs:
           if [ -n "${{ inputs.z3_commit_hash }}" ]; then
             COMMIT_HASH="${{ inputs.z3_commit_hash }}"
             echo "🔨 Adding provided commit to build queue: $COMMIT_HASH"
-            python scripts/scheduling/s3_state.py z3 build-queue add "$COMMIT_HASH"
+            python scripts/scheduling/s3_state.py z3 build-queue-v2 add "$COMMIT_HASH"
             echo "build_needed=true" >> $GITHUB_OUTPUT
             echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
             echo "is_manual_build=true" >> $GITHUB_OUTPUT
@@ -128,7 +128,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
+      - name: Check if commit is still in build queue
+        id: check-queue
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue-v2 check "$COMMIT_HASH" 2>&1 | tail -1)
+          if [ "$IN_QUEUE" = "true" ]; then
+            echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
+            echo "should_upload=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
+            echo "should_upload=false" >> $GITHUB_OUTPUT
+          fi
+      
       - name: Upload production binary to S3
+        if: steps.check-queue.outputs.should_upload == 'true'
         run: |
           aws s3api put-object \
             --bucket ${{ secrets.AWS_S3_BUCKET }} \
@@ -136,6 +152,11 @@ jobs:
             --body z3/build/artifacts.tar.gz \
             --tagging "Type=Production"
           echo "✅ Uploaded production binary to S3"
+      
+      - name: Discard build (not in queue)
+        if: steps.check-queue.outputs.should_upload == 'false'
+        run: |
+          echo "⚠️  Build discarded - commit was removed from queue"
 
   build-static-coverage:
     needs: check-build-queue
@@ -223,7 +244,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
+      - name: Check if commit is still in build queue (coverage)
+        id: check-queue-coverage
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue-v2 check "$COMMIT_HASH" 2>&1 | tail -1)
+          if [ "$IN_QUEUE" = "true" ]; then
+            echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
+            echo "should_upload=true" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
+            echo "should_upload=false" >> $GITHUB_OUTPUT
+          fi
+      
       - name: Upload coverage binary to S3
+        if: steps.check-queue-coverage.outputs.should_upload == 'true'
         run: |
           aws s3api put-object \
             --bucket ${{ secrets.AWS_S3_BUCKET }} \
@@ -231,6 +268,11 @@ jobs:
             --body z3/build/artifacts.tar.gz \
             --tagging "Type=Coverage"
           echo "✅ Uploaded coverage binary to S3"
+      
+      - name: Discard coverage build (not in queue)
+        if: steps.check-queue-coverage.outputs.should_upload == 'false'
+        run: |
+          echo "⚠️  Coverage build discarded - commit was removed from queue"
 
   mark-as-built:
     needs: [check-build-queue, build-static, build-static-coverage]
@@ -257,11 +299,12 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       
       - name: Move commit to built state
+        if: steps.check-queue.outputs.should_upload == 'true' && steps.check-queue-coverage.outputs.should_upload == 'true'
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          python scripts/scheduling/s3_state.py z3 build-queue move-to-built $COMMIT_HASH
+          python scripts/scheduling/s3_state.py z3 build-queue-v2 move-to-built $COMMIT_HASH
           echo "✅ Moved commit $COMMIT_HASH to built state (both binaries uploaded)"
 
   mark-as-failed:
@@ -296,7 +339,7 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          python scripts/scheduling/s3_state.py z3 build-queue move-to-failed $COMMIT_HASH
+          python scripts/scheduling/s3_state.py z3 build-queue-v2 move-to-failed $COMMIT_HASH
           echo "❌ Moved commit $COMMIT_HASH to failed state (one or both builds failed)"
 
   skip-build:

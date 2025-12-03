@@ -72,37 +72,46 @@ def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
             print(f"✅ Removed {commit_hash[:8]} from schedule")
 
 
-def run_fuzzer(solver: str, verify_binary: bool = True) -> Optional[str]:
-    """Run fuzzer check - atomically selects and increments fuzz_count for the least-fuzzed commit.
-    Returns commit hash if available and binary exists, None otherwise.
+from typing import Tuple
+def run_fuzzer(solver: str, verify_binary: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    """Get commit to fuzz from schedule and latest build to use.
+    Returns (commit_to_fuzz, latest_build_to_use) tuple.
     
-    This atomic operation prevents race conditions where multiple workflows select the same commit."""
+    - commit_to_fuzz: Oldest commit from fuzzing schedule (FIFO)
+    - latest_build_to_use: Latest available build from S3 (to use for fuzzing)
+    
+    This allows fuzzing old commits using the latest build to avoid discovering
+    bugs that were already fixed in newer commits."""
     try:
         manager = get_state_manager(solver)
         
-        # Atomically select and increment the least-fuzzed commit
-        commit = manager.select_and_increment_least_fuzzed()
-        if not commit:
+        # Step 1: Get commit to fuzz (oldest from schedule, FIFO)
+        commit_to_fuzz = manager.select_and_increment_least_fuzzed()
+        if not commit_to_fuzz:
             print("⏭️  No commits in fuzzing schedule", file=sys.stderr)
-            return None
+            return None, None
+        
+        # Step 2: Get latest available build from S3
+        latest_build = manager.get_latest_available_build()
+        if not latest_build:
+            print("⏭️  No builds available in S3", file=sys.stderr)
+            return None, None
         
         if verify_binary:
             from botocore.exceptions import ClientError
             
-            s3_key = f"solvers/{solver}/builds/production/{commit}.tar.gz"
+            s3_key = f"solvers/{solver}/builds/production/{latest_build}.tar.gz"
             
             try:
                 manager.s3_client.head_object(Bucket=manager.bucket, Key=s3_key)
             except ClientError as e:
                 if e.response.get('Error', {}).get('Code') == '404':
-                    print(f"⚠️  Binary not found for commit {commit[:8]}, skipping", file=sys.stderr)
-                    # Note: fuzz_count was already incremented, but that's okay - 
-                    # it prevents this commit from being selected again until binary is available
-                    return None
+                    print(f"⚠️  Binary not found for latest build {latest_build[:8]}, skipping", file=sys.stderr)
+                    return None, None
                 raise S3StateError(f"Error checking binary existence: {e}")
         
-        print(f"✅ Selected commit {commit[:8]} for fuzzing (fuzz_count incremented)", file=sys.stderr)
-        return commit
+        print(f"✅ Selected commit {commit_to_fuzz[:8]} to fuzz using latest build {latest_build[:8]}", file=sys.stderr)
+        return commit_to_fuzz, latest_build
     except S3StateError as e:
         print(f"❌ S3 State Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -130,13 +139,18 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if args.command == 'select':
-        commit = run_fuzzer(args.solver, verify_binary=not args.no_verify)
+        commit_to_fuzz, latest_build = run_fuzzer(args.solver, verify_binary=not args.no_verify)
         if args.json:
             import json
-            print(json.dumps({'commit': commit} if commit else {'commit': None}))
+            result = {
+                'commit_to_fuzz': commit_to_fuzz,
+                'latest_build': latest_build
+            }
+            print(json.dumps(result))
         else:
-            if commit:
-                print(commit)
+            if commit_to_fuzz and latest_build:
+                # Output both values, separated by space (workflow can parse)
+                print(f"{commit_to_fuzz} {latest_build}")
                 sys.exit(0)
             else:
                 # No commit found is not an error - just exit successfully

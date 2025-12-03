@@ -172,6 +172,66 @@ class S3StateManager:
             return True
         return False
     
+    # Build queue v2 operations (separate file for new approach)
+    def add_to_build_queue_v2(self, commit_hash: str) -> None:
+        """Add commit to build queue v2"""
+        def update(queue):
+            if commit_hash not in queue.get('queue', []):
+                queue.setdefault('queue', []).append(commit_hash)
+            return queue
+        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
+    
+    def clear_build_queue_v2(self) -> None:
+        """Clear build queue v2 (remove all commits from queue, keep built/failed)"""
+        def update(queue):
+            queue['queue'] = []
+            return queue
+        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
+    
+    def is_in_build_queue_v2(self, commit_hash: str) -> bool:
+        """Check if commit is in build queue v2. Returns True if in queue, False otherwise."""
+        queue = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
+        return commit_hash in queue.get('queue', [])
+    
+    def remove_from_build_queue_v2(self, commit_hash: str) -> bool:
+        """Remove commit from build queue v2. Returns True if removed, False if not found"""
+        queue = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
+        if commit_hash in queue.get('queue', []):
+            queue['queue'].remove(commit_hash)
+            self.write_state('build-queue-v2.json', queue)
+            return True
+        return False
+    
+    def move_to_built_v2(self, commit_hash: str) -> bool:
+        """Move commit from queue v2 to built. Returns True if moved, False if not in queue"""
+        def update(queue):
+            queue.setdefault('queue', [])
+            queue.setdefault('built', [])
+            if commit_hash in queue['queue']:
+                queue['queue'].remove(commit_hash)
+                if commit_hash not in queue['built']:
+                    queue['built'].append(commit_hash)
+            return queue
+        queue_before = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
+        was_in_queue = commit_hash in queue_before.get('queue', [])
+        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
+        return was_in_queue
+    
+    def move_to_failed_v2(self, commit_hash: str) -> bool:
+        """Move commit from queue v2 to failed. Returns True if moved, False if not in queue"""
+        def update(queue):
+            queue.setdefault('queue', [])
+            queue.setdefault('failed', [])
+            if commit_hash in queue['queue']:
+                queue['queue'].remove(commit_hash)
+                if commit_hash not in queue['failed']:
+                    queue['failed'].append(commit_hash)
+            return queue
+        queue_before = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
+        was_in_queue = commit_hash in queue_before.get('queue', [])
+        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
+        return was_in_queue
+    
     # Fuzzing schedule operations
     def add_to_fuzzing_schedule(self, commit_hash: str) -> None:
         """Add commit to fuzzing schedule (if not already present)"""
@@ -259,6 +319,44 @@ class S3StateManager:
         """Get last checked commit from state.json"""
         state = self.read_state('state.json', default={'last_checked_commit': None})
         return state.get('last_checked_commit')
+    
+    def get_latest_available_build(self) -> Optional[str]:
+        """Get the latest available build commit hash from S3.
+        Lists all production builds and returns the most recent one (by LastModified timestamp).
+        Returns None if no builds are available."""
+        try:
+            prefix = f"solvers/{self.solver}/builds/production/"
+            
+            # List all objects in the production builds directory
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=self.bucket, Prefix=prefix)
+            
+            latest_commit = None
+            latest_time = None
+            
+            for page in pages:
+                if 'Contents' not in page:
+                    continue
+                
+                for obj in page['Contents']:
+                    # Extract commit hash from key: solvers/{solver}/builds/production/{commit_hash}.tar.gz
+                    key = obj['Key']
+                    if key.endswith('.tar.gz'):
+                        # Extract commit hash (full 40-char hash)
+                        commit_hash = key[len(prefix):-7]  # Remove prefix and .tar.gz
+                        
+                        # Use LastModified timestamp to find latest
+                        last_modified = obj['LastModified']
+                        
+                        if latest_time is None or last_modified > latest_time:
+                            latest_time = last_modified
+                            latest_commit = commit_hash
+            
+            return latest_commit
+        except ClientError as e:
+            raise S3StateError(f"Failed to list builds from S3: {e}")
+        except Exception as e:
+            raise S3StateError(f"Unexpected error finding latest build: {e}")
 
 
 def get_state_manager(solver: str) -> S3StateManager:
@@ -289,6 +387,20 @@ if __name__ == '__main__':
     p.add_argument('commit', help='Commit hash')
     build_queue_sub.add_parser('get-built', help='Get list of built commits')
     p = build_queue_sub.add_parser('remove-from-built', help='Remove commit from built array')
+    p.add_argument('commit', help='Commit hash')
+    
+    # Build queue v2 commands
+    build_queue_v2_parser = subparsers.add_parser('build-queue-v2', help='Build queue v2 operations')
+    build_queue_v2_sub = build_queue_v2_parser.add_subparsers(dest='action')
+    
+    p = build_queue_v2_sub.add_parser('add', help='Add commit to build queue v2')
+    p.add_argument('commit', help='Commit hash')
+    p = build_queue_v2_sub.add_parser('clear', help='Clear build queue v2')
+    p = build_queue_v2_sub.add_parser('check', help='Check if commit is in build queue v2')
+    p.add_argument('commit', help='Commit hash')
+    p = build_queue_v2_sub.add_parser('move-to-built', help='Move commit from queue v2 to built')
+    p.add_argument('commit', help='Commit hash')
+    p = build_queue_v2_sub.add_parser('move-to-failed', help='Move commit from queue v2 to failed')
     p.add_argument('commit', help='Commit hash')
     
     # Fuzzing schedule commands
@@ -358,6 +470,29 @@ if __name__ == '__main__':
                     print(f"✅ Removed {args.commit} from built")
                 else:
                     print(f"⚠️  {args.commit} not found in built")
+        
+        elif args.command == 'build-queue-v2':
+            if args.action == 'add':
+                manager.add_to_build_queue_v2(args.commit)
+                print(f"✅ Added {args.commit} to build queue v2")
+            elif args.action == 'clear':
+                manager.clear_build_queue_v2()
+                print(f"✅ Cleared build queue v2")
+            elif args.action == 'check':
+                if manager.is_in_build_queue_v2(args.commit):
+                    print("true")
+                else:
+                    print("false")
+            elif args.action == 'move-to-built':
+                if manager.move_to_built_v2(args.commit):
+                    print(f"✅ Moved {args.commit} to built")
+                else:
+                    print(f"⚠️  {args.commit} not found in queue")
+            elif args.action == 'move-to-failed':
+                if manager.move_to_failed_v2(args.commit):
+                    print(f"✅ Moved {args.commit} to failed")
+                else:
+                    print(f"⚠️  {args.commit} not found in queue")
         
         elif args.command == 'fuzzing-schedule':
             if args.action == 'add':

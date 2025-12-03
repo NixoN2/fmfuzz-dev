@@ -20,7 +20,7 @@ on:
     - cron: '45 0,6,12,18 * * *'  # Run every 6 hours starting at 00:45 (00:45, 06:45, 12:45, 18:45)
 
 jobs:
-  check-fuzzing-schedule:
+  check-latest-build:
     runs-on: ubuntu-latest
     outputs:
       fuzzing_needed: ${{ steps.set-outputs.outputs.fuzzing_needed }}
@@ -47,30 +47,43 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
-      - name: Check fuzzing schedule or add manual commit
+      - name: Get commit to fuzz and latest build
         id: set-outputs
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.cvc5_commit_hash }}" ]; then
-            COMMIT_HASH="${{ inputs.cvc5_commit_hash }}"
-            echo "🔨 Adding provided commit to fuzzing schedule: $COMMIT_HASH"
-            python scripts/scheduling/s3_state.py cvc5 fuzzing-schedule add "$COMMIT_HASH"
+            COMMIT_TO_FUZZ="${{ inputs.cvc5_commit_hash }}"
+            # For manual runs, get latest build to use
+            LATEST_BUILD=$(python -c "from scripts.scheduling.s3_state import get_state_manager; m = get_state_manager('cvc5'); print(m.get_latest_available_build() or '')")
+            if [ -z "$LATEST_BUILD" ]; then
+              echo "⚠️  No latest build available, using provided commit as build"
+              LATEST_BUILD="$COMMIT_TO_FUZZ"
+            fi
+            echo "🔨 Using provided commit: $COMMIT_TO_FUZZ with build: $LATEST_BUILD"
             echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
-            echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
+            echo "commit_to_fuzz=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+            echo "latest_build=$LATEST_BUILD" >> $GITHUB_OUTPUT
+            echo "sha=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
             echo "is_manual_run=true" >> $GITHUB_OUTPUT
             echo "binary_available=true" >> $GITHUB_OUTPUT
           else
-            COMMIT_HASH=$(python scripts/scheduling/fuzzer.py cvc5 select)
-            if [ -n "$COMMIT_HASH" ]; then
-              echo "✅ Found commit in fuzzing schedule: $COMMIT_HASH"
+            RESULT=$(python scripts/scheduling/fuzzer.py cvc5 select 2>&1)
+            if [ -n "$RESULT" ] && [ "$(echo "$RESULT" | wc -w)" -eq 2 ]; then
+              COMMIT_TO_FUZZ=$(echo "$RESULT" | awk '{print $1}')
+              LATEST_BUILD=$(echo "$RESULT" | awk '{print $2}')
+              echo "✅ Found commit to fuzz: $COMMIT_TO_FUZZ, using latest build: $LATEST_BUILD"
               echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
-              echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
+              echo "commit_to_fuzz=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+              echo "latest_build=$LATEST_BUILD" >> $GITHUB_OUTPUT
+              echo "sha=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
               echo "is_manual_run=false" >> $GITHUB_OUTPUT
               echo "binary_available=true" >> $GITHUB_OUTPUT
             else
-              echo "⏭️  No commits in fuzzing schedule or binary not available"
+              echo "⏭️  No commits in fuzzing schedule or no builds available"
               echo "fuzzing_needed=false" >> $GITHUB_OUTPUT
+              echo "commit_to_fuzz=" >> $GITHUB_OUTPUT
+              echo "latest_build=" >> $GITHUB_OUTPUT
               echo "sha=" >> $GITHUB_OUTPUT
               echo "is_manual_run=false" >> $GITHUB_OUTPUT
               echo "binary_available=false" >> $GITHUB_OUTPUT
@@ -78,25 +91,25 @@ jobs:
           fi
 
   skip-fuzzing:
-    needs: check-fuzzing-schedule
+    needs: check-latest-build
     if: |
       github.event_name == 'schedule' &&
-      (needs.check-fuzzing-schedule.outputs.fuzzing_needed == 'false' || needs.check-fuzzing-schedule.outputs.binary_available == 'false')
+      (needs.check-latest-build.outputs.fuzzing_needed == 'false' || needs.check-latest-build.outputs.binary_available == 'false')
     runs-on: ubuntu-latest
     steps:
       - name: Skip fuzzing
         run: |
-          if [ "${{ needs.check-fuzzing-schedule.outputs.fuzzing_needed }}" == "false" ]; then
-            echo "✅ No commits in fuzzing schedule - skipping fuzzing"
+          if [ "${{ needs.check-latest-build.outputs.fuzzing_needed }}" == "false" ]; then
+            echo "✅ No builds available - skipping fuzzing"
           else
             echo "❌ Production binary not available - skipping fuzzing"
           fi
 
   commit-fuzzer:
-    needs: check-fuzzing-schedule
+    needs: check-latest-build
     if: |
       (github.event_name == 'workflow_dispatch') ||
-      (github.event_name == 'schedule' && needs.check-fuzzing-schedule.outputs.fuzzing_needed == 'true' && needs.check-fuzzing-schedule.outputs.binary_available == 'true')
+      (github.event_name == 'schedule' && needs.check-latest-build.outputs.fuzzing_needed == 'true' && needs.check-latest-build.outputs.binary_available == 'true')
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.extract-tests.outputs.matrix }}
@@ -154,13 +167,13 @@ jobs:
             git clone https://github.com/cvc5/cvc5.git cvc5
           fi
 
-      - name: Checkout specific commit
+      - name: Checkout commit to fuzz
         working-directory: cvc5
         run: |
-          COMMIT_HASH="${{ needs.check-fuzzing-schedule.outputs.sha }}"
-          echo "🔨 Checking out commit: $COMMIT_HASH"
+          COMMIT_TO_FUZZ="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
+          echo "🔨 Checking out commit to fuzz: $COMMIT_TO_FUZZ"
           git fetch origin
-          git checkout $COMMIT_HASH
+          git checkout $COMMIT_TO_FUZZ
           echo "Checked out commit: $(git rev-parse HEAD)"
 
       - name: Get CVC5 commit hash
@@ -416,12 +429,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Download production binary from S3
+      - name: Download latest production binary from S3
         id: download-production-binary
         continue-on-error: true
         run: |
           mkdir -p artifacts
-          S3_KEY="solvers/cvc5/builds/production/${{ needs.commit-fuzzer.outputs.commit_hash }}.tar.gz"
+          LATEST_BUILD="${{ needs.check-latest-build.outputs.latest_build }}"
+          S3_KEY="solvers/cvc5/builds/production/${LATEST_BUILD}.tar.gz"
           
           if aws s3api head-object \
             --bucket ${{ secrets.AWS_S3_BUCKET }} \
@@ -594,7 +608,7 @@ jobs:
           echo "✅ No bugs found in this run, skipping S3 upload"
 
   update-fuzz-count:
-    needs: [check-fuzzing-schedule, commit-fuzzer, collect-bugs]
+    needs: [check-latest-build, commit-fuzzer, collect-bugs]
     if: always() && needs.commit-fuzzer.result == 'success'
     runs-on: ubuntu-latest
     
@@ -621,5 +635,5 @@ jobs:
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
-          COMMIT_HASH="${{ needs.check-fuzzing-schedule.outputs.sha }}"
+          COMMIT_HASH="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
           python scripts/scheduling/fuzzer.py cvc5 increment $COMMIT_HASH

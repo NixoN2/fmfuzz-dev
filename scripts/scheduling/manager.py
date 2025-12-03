@@ -113,16 +113,27 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                 print(f"⚠️  Error checking commit {commit[:8]}: {e}", file=sys.stderr)
                 continue
         
-        # Reverse the list so we add oldest commits first
-        # This ensures oldest commits are built and fuzzed first
-        new_commits_with_cpp.reverse()
-        
-        for commit in new_commits_with_cpp:
+        if new_commits_with_cpp:
+            # Clear build queue v2 when new commits arrive (optimization)
+            manager.clear_build_queue_v2()
+            print("🧹 Cleared build queue v2")
+            
+            # Add ONLY the latest commit to build queue v2
+            latest_commit = new_commits_with_cpp[-1]  # Last in list is latest
             try:
-                manager.add_to_build_queue(commit)
-                print(f"✅ Added {commit[:8]} to build queue")
+                manager.add_to_build_queue_v2(latest_commit)
+                print(f"✅ Added latest commit {latest_commit[:8]} to build queue v2")
             except Exception as e:
-                print(f"❌ Error adding {commit[:8]} to build queue: {e}", file=sys.stderr)
+                print(f"❌ Error adding latest commit to build queue: {e}", file=sys.stderr)
+            
+            # Add ALL commits with C++ changes directly to fuzzing schedule
+            # Assumption: We'll have time to build latest commit and use it for next fuzzing
+            for commit in new_commits_with_cpp:
+                try:
+                    manager.add_to_fuzzing_schedule(commit)
+                    print(f"✅ Added {commit[:8]} to fuzzing schedule")
+                except Exception as e:
+                    print(f"❌ Error adding {commit[:8]} to fuzzing schedule: {e}", file=sys.stderr)
         
         manager.update_last_checked_commit(commits[0])
         print(f"✅ Updated last checked commit to {commits[0][:8]}")
