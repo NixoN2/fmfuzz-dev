@@ -12,12 +12,12 @@ from scheduling.s3_state import get_state_manager, S3StateError
 
 
 def get_least_fuzzed_commit(solver: str) -> Optional[str]:
-    """Get the least-fuzzed commit from fuzzing schedule v2. Returns None if schedule is empty.
+    """Get the least-fuzzed commit from fuzzing schedule. Returns None if schedule is empty.
     When all commits have the same fuzz_count, returns the oldest (first in list).
     
-    NOTE: This is a read-only operation. For atomic selection with increment, use select_and_increment_least_fuzzed_v2."""
+    NOTE: This is a read-only operation. For atomic selection with increment, use select_and_increment_least_fuzzed."""
     manager = get_state_manager(solver)
-    schedule = manager.get_fuzzing_schedule_v2()
+    schedule = manager.get_fuzzing_schedule()
     
     if not schedule:
         return None
@@ -43,7 +43,7 @@ def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
     manager = get_state_manager(solver)
     
     # Verify commit exists in schedule
-    schedule = manager.get_fuzzing_schedule_v2()
+    schedule = manager.get_fuzzing_schedule()
     commit_found = any(c.get('hash') == commit_hash for c in schedule)
     
     if not commit_found:
@@ -68,16 +68,16 @@ def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
         
         if all_unfuzzed:
             print(f"📋 Schedule has {schedule_size} commits, all unfuzzed. Removing oldest: {commit_hash[:8]}")
-            manager.remove_from_fuzzing_schedule_v2(commit_hash)
+            manager.remove_from_fuzzing_schedule(commit_hash)
             print(f"✅ Removed {commit_hash[:8]} from schedule")
 
 
 from typing import Tuple
 def run_fuzzer(solver: str, verify_binary: bool = True) -> Tuple[Optional[str], Optional[str]]:
-    """Get commit to fuzz from schedule v2 and latest build to use.
+    """Get commit to fuzz from schedule and latest build to use.
     Returns (commit_to_fuzz, latest_build_to_use) tuple.
     
-    - commit_to_fuzz: Oldest commit from fuzzing schedule v2 (FIFO)
+    - commit_to_fuzz: Oldest commit from fuzzing schedule (FIFO)
     - latest_build_to_use: Latest available build from S3 (to use for fuzzing)
     
     This allows fuzzing old commits using the latest build to avoid discovering
@@ -85,10 +85,10 @@ def run_fuzzer(solver: str, verify_binary: bool = True) -> Tuple[Optional[str], 
     try:
         manager = get_state_manager(solver)
         
-        # Step 1: Get commit to fuzz (oldest from schedule v2, FIFO)
-        commit_to_fuzz = manager.select_and_increment_least_fuzzed_v2()
+        # Step 1: Get commit to fuzz (oldest from schedule, FIFO)
+        commit_to_fuzz = manager.select_and_increment_least_fuzzed()
         if not commit_to_fuzz:
-            print("⏭️  No commits in fuzzing schedule v2", file=sys.stderr)
+            print("⏭️  No commits in fuzzing schedule", file=sys.stderr)
             return None, None
         
         # Step 2: Get latest available build from S3

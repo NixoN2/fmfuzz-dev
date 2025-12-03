@@ -45,7 +45,7 @@ jobs:
           if [ -n "${{ inputs.z3_commit_hash }}" ]; then
             COMMIT_HASH="${{ inputs.z3_commit_hash }}"
             echo "🔨 Adding provided commit to build queue: $COMMIT_HASH"
-            python scripts/scheduling/s3_state.py z3 build-queue-v2 add "$COMMIT_HASH"
+            python scripts/scheduling/s3_state.py z3 build-queue add "$COMMIT_HASH"
             echo "build_needed=true" >> $GITHUB_OUTPUT
             echo "sha=$COMMIT_HASH" >> $GITHUB_OUTPUT
             echo "is_manual_build=true" >> $GITHUB_OUTPUT
@@ -134,7 +134,7 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
-          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue-v2 check "$COMMIT_HASH" 2>&1 | tail -1)
+          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue check "$COMMIT_HASH" 2>&1 | tail -1)
           if [ "$IN_QUEUE" = "true" ]; then
             echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
             echo "should_upload=true" >> $GITHUB_OUTPUT
@@ -250,7 +250,7 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
-          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue-v2 check "$COMMIT_HASH" 2>&1 | tail -1)
+          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue check "$COMMIT_HASH" 2>&1 | tail -1)
           if [ "$IN_QUEUE" = "true" ]; then
             echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
             echo "should_upload=true" >> $GITHUB_OUTPUT
@@ -304,7 +304,7 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          python scripts/scheduling/s3_state.py z3 build-queue-v2 move-to-built $COMMIT_HASH
+          python scripts/scheduling/s3_state.py z3 build-queue move-to-built $COMMIT_HASH
           echo "✅ Moved commit $COMMIT_HASH to built state (both binaries uploaded)"
 
   mark-as-failed:
@@ -339,7 +339,7 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          python scripts/scheduling/s3_state.py z3 build-queue-v2 move-to-failed $COMMIT_HASH
+          python scripts/scheduling/s3_state.py z3 build-queue move-to-failed $COMMIT_HASH
           echo "❌ Moved commit $COMMIT_HASH to failed state (one or both builds failed)"
 
   skip-build:

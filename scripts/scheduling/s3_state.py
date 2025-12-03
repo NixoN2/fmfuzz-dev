@@ -27,6 +27,10 @@ class S3StateConflictError(S3StateError):
     pass
 
 
+# Default state version - change this to switch versions (e.g., "v3" for next version)
+DEFAULT_STATE_VERSION = "v2"
+
+
 class S3StateManager:
     def __init__(self, bucket: str, solver: str, region: Optional[str] = None):
         self.bucket = bucket
@@ -40,6 +44,30 @@ class S3StateManager:
     
     def _get_s3_key(self, filename: str) -> str:
         return f"{self.base_path}/{filename}"
+    
+    def _get_versioned_filename(self, base_filename: str, version: Optional[str] = None) -> str:
+        """Get versioned filename. If version is None, returns base_filename unchanged.
+        
+        Pattern:
+        - state.json + v2 -> statev2.json
+        - fuzzing-schedule.json + v2 -> fuzzing-schedulev2.json
+        - build-queue.json + v2 -> build-queue-v2.json
+        
+        For v3+, uses same pattern: base + version + .json
+        """
+        if version is None:
+            return base_filename
+        
+        # Handle special case: build-queue uses hyphen
+        if base_filename == 'build-queue.json':
+            return f"build-queue-{version}.json"
+        
+        # For other files, insert version before .json
+        if base_filename.endswith('.json'):
+            return base_filename[:-5] + version + '.json'
+        
+        # Fallback: append version
+        return f"{base_filename}-{version}"
     
     def read_state(self, filename: str, default: Optional[Any] = None) -> Any:
         s3_key = self._get_s3_key(filename)
@@ -110,26 +138,47 @@ class S3StateManager:
         except ClientError as e:
             raise S3StateError(f"Failed to delete state file {self._get_s3_key(filename)}: {e}")
     
-    # Build queue operations
-    def add_to_build_queue(self, commit_hash: str) -> None:
-        """Add commit to build queue"""
+    # Build queue operations (versioned core, defaults to DEFAULT_STATE_VERSION)
+    def add_to_build_queue(self, commit_hash: str, version: Optional[str] = None) -> None:
+        """Add commit to build queue (versioned).
+        
+        Args:
+            commit_hash: Commit hash to add
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
         def update(queue):
             if commit_hash not in queue.get('queue', []):
                 queue.setdefault('queue', []).append(commit_hash)
             return queue
-        self.update_state('build-queue.json', update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
     
-    def remove_from_build_queue(self, commit_hash: str) -> bool:
-        """Remove commit from build queue. Returns True if removed, False if not found"""
-        queue = self.read_state('build-queue.json', default={'queue': [], 'built': [], 'failed': []})
+    def remove_from_build_queue(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Remove commit from build queue (versioned). Returns True if removed, False if not found.
+        
+        Args:
+            commit_hash: Commit hash to remove
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
+        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         if commit_hash in queue.get('queue', []):
             queue['queue'].remove(commit_hash)
-            self.write_state('build-queue.json', queue)
+            self.write_state(filename, queue)
             return True
         return False
     
-    def move_to_built(self, commit_hash: str) -> bool:
-        """Move commit from queue to built. Returns True if moved, False if not in queue"""
+    def move_to_built(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Move commit from queue to built (versioned). Returns True if moved, False if not in queue.
+        
+        Args:
+            commit_hash: Commit hash to move
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
         def update(queue):
             queue.setdefault('queue', [])
             queue.setdefault('built', [])
@@ -138,13 +187,20 @@ class S3StateManager:
                 if commit_hash not in queue['built']:
                     queue['built'].append(commit_hash)
             return queue
-        queue_before = self.read_state('build-queue.json', default={'queue': [], 'built': [], 'failed': []})
+        queue_before = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state('build-queue.json', update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
         return was_in_queue
     
-    def move_to_failed(self, commit_hash: str) -> bool:
-        """Move commit from queue to failed. Returns True if moved, False if not in queue"""
+    def move_to_failed(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Move commit from queue to failed (versioned). Returns True if moved, False if not in queue.
+        
+        Args:
+            commit_hash: Commit hash to move
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
         def update(queue):
             queue.setdefault('queue', [])
             queue.setdefault('failed', [])
@@ -153,109 +209,107 @@ class S3StateManager:
                 if commit_hash not in queue['failed']:
                     queue['failed'].append(commit_hash)
             return queue
-        queue_before = self.read_state('build-queue.json', default={'queue': [], 'built': [], 'failed': []})
+        queue_before = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state('build-queue.json', update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
         return was_in_queue
     
-    def get_built_commits(self) -> list:
-        """Get list of commits in 'built' array"""
-        queue = self.read_state('build-queue.json', default={'queue': [], 'built': [], 'failed': []})
+    def get_built_commits(self, version: Optional[str] = None) -> list:
+        """Get list of commits in 'built' array (versioned).
+        
+        Args:
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
+        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         return queue.get('built', [])
     
-    def remove_from_built(self, commit_hash: str) -> bool:
-        """Remove commit from built array. Returns True if removed, False if not found"""
-        queue = self.read_state('build-queue.json', default={'queue': [], 'built': [], 'failed': []})
+    def remove_from_built(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Remove commit from built array (versioned). Returns True if removed, False if not found.
+        
+        Args:
+            commit_hash: Commit hash to remove
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
+        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         if commit_hash in queue.get('built', []):
             queue['built'].remove(commit_hash)
-            self.write_state('build-queue.json', queue)
+            self.write_state(filename, queue)
             return True
         return False
     
-    # Build queue v2 operations (separate file for new approach)
-    def add_to_build_queue_v2(self, commit_hash: str) -> None:
-        """Add commit to build queue v2"""
-        def update(queue):
-            if commit_hash not in queue.get('queue', []):
-                queue.setdefault('queue', []).append(commit_hash)
-            return queue
-        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
-    
-    def clear_build_queue_v2(self) -> None:
-        """Clear build queue v2 (remove all commits from queue, keep built/failed)"""
+    def clear_build_queue(self, version: Optional[str] = None) -> None:
+        """Clear build queue (versioned) - remove all commits from queue, keep built/failed.
+        
+        Args:
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
         def update(queue):
             queue['queue'] = []
             return queue
-        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
     
-    def is_in_build_queue_v2(self, commit_hash: str) -> bool:
-        """Check if commit is in build queue v2. Returns True if in queue, False otherwise."""
-        queue = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
+    def is_in_build_queue(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Check if commit is in build queue (versioned). Returns True if in queue, False otherwise.
+        
+        Args:
+            commit_hash: Commit hash to check
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('build-queue.json', version)
+        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
         return commit_hash in queue.get('queue', [])
     
-    def remove_from_build_queue_v2(self, commit_hash: str) -> bool:
-        """Remove commit from build queue v2. Returns True if removed, False if not found"""
-        queue = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
-        if commit_hash in queue.get('queue', []):
-            queue['queue'].remove(commit_hash)
-            self.write_state('build-queue-v2.json', queue)
-            return True
-        return False
-    
-    def move_to_built_v2(self, commit_hash: str) -> bool:
-        """Move commit from queue v2 to built. Returns True if moved, False if not in queue"""
-        def update(queue):
-            queue.setdefault('queue', [])
-            queue.setdefault('built', [])
-            if commit_hash in queue['queue']:
-                queue['queue'].remove(commit_hash)
-                if commit_hash not in queue['built']:
-                    queue['built'].append(commit_hash)
-            return queue
-        queue_before = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
-        was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
-        return was_in_queue
-    
-    def move_to_failed_v2(self, commit_hash: str) -> bool:
-        """Move commit from queue v2 to failed. Returns True if moved, False if not in queue"""
-        def update(queue):
-            queue.setdefault('queue', [])
-            queue.setdefault('failed', [])
-            if commit_hash in queue['queue']:
-                queue['queue'].remove(commit_hash)
-                if commit_hash not in queue['failed']:
-                    queue['failed'].append(commit_hash)
-            return queue
-        queue_before = self.read_state('build-queue-v2.json', default={'queue': [], 'built': [], 'failed': []})
-        was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state('build-queue-v2.json', update, default={'queue': [], 'built': [], 'failed': []})
-        return was_in_queue
-    
-    # Fuzzing schedule operations
-    def add_to_fuzzing_schedule(self, commit_hash: str) -> None:
-        """Add commit to fuzzing schedule (if not already present)"""
+    # Fuzzing schedule operations (versioned core, defaults to DEFAULT_STATE_VERSION)
+    def add_to_fuzzing_schedule(self, commit_hash: str, version: Optional[str] = None) -> None:
+        """Add commit to fuzzing schedule (versioned). If not already present, adds with fuzz_count=0.
+        
+        Args:
+            commit_hash: Commit hash to add
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('fuzzing-schedule.json', version)
         def update(schedule):
             schedule = schedule if isinstance(schedule, list) else []
             if not any(c.get('hash') == commit_hash for c in schedule):
                 schedule.append({'hash': commit_hash, 'fuzz_count': 0})
             return schedule
-        self.update_state('fuzzing-schedule.json', update, default=[])
+        self.update_state(filename, update, default=[])
     
-    def remove_from_fuzzing_schedule(self, commit_hash: str) -> bool:
-        """Remove commit from fuzzing schedule. Returns True if removed, False if not found"""
-        schedule = self.get_fuzzing_schedule()
+    def remove_from_fuzzing_schedule(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Remove commit from fuzzing schedule (versioned). Returns True if removed, False if not found.
+        
+        Args:
+            commit_hash: Commit hash to remove
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('fuzzing-schedule.json', version)
+        schedule = self.get_fuzzing_schedule(version=version)
         original_len = len(schedule)
         schedule = [c for c in schedule if c.get('hash') != commit_hash]
         if len(schedule) < original_len:
-            self.write_state('fuzzing-schedule.json', schedule)
+            self.write_state(filename, schedule)
             return True
         return False
     
-    def select_and_increment_least_fuzzed(self) -> Optional[str]:
-        """Atomically select the least-fuzzed commit and increment its fuzz_count.
+    def select_and_increment_least_fuzzed(self, version: Optional[str] = None) -> Optional[str]:
+        """Atomically select the least-fuzzed commit and increment its fuzz_count (versioned).
         Returns the commit hash if found, None if schedule is empty.
-        This prevents race conditions where multiple workflows select the same commit."""
+        This prevents race conditions where multiple workflows select the same commit.
+        
+        Args:
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('fuzzing-schedule.json', version)
         def update(schedule):
             schedule = schedule if isinstance(schedule, list) else []
             if not schedule:
@@ -273,7 +327,7 @@ class S3StateManager:
             
             return schedule
         
-        schedule_before = self.get_fuzzing_schedule()
+        schedule_before = self.get_fuzzing_schedule(version=version)
         if not schedule_before:
             return None
         
@@ -287,14 +341,21 @@ class S3StateManager:
         
         if selected_commit:
             # Atomically update: select and increment in one operation
-            self.update_state('fuzzing-schedule.json', update, default=[])
+            self.update_state(filename, update, default=[])
             return selected_commit
         
         return None
     
-    def increment_fuzz_count(self, commit_hash: str) -> bool:
-        """Increment fuzz_count for a commit. Returns True if updated, False if not found.
-        This is idempotent - if called multiple times, it will keep incrementing."""
+    def increment_fuzz_count(self, commit_hash: str, version: Optional[str] = None) -> bool:
+        """Increment fuzz_count for a commit (versioned). Returns True if updated, False if not found.
+        This is idempotent - if called multiple times, it will keep incrementing.
+        
+        Args:
+            commit_hash: Commit hash to increment
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('fuzzing-schedule.json', version)
         def update(schedule):
             schedule = schedule if isinstance(schedule, list) else []
             for commit in schedule:
@@ -302,108 +363,41 @@ class S3StateManager:
                     commit['fuzz_count'] = commit.get('fuzz_count', 0) + 1
                     return schedule
             return schedule
-        schedule_before = self.get_fuzzing_schedule()
-        self.update_state('fuzzing-schedule.json', update, default=[])
+        schedule_before = self.get_fuzzing_schedule(version=version)
+        self.update_state(filename, update, default=[])
         return any(c.get('hash') == commit_hash for c in schedule_before)
     
-    def get_fuzzing_schedule(self) -> list:
-        """Get fuzzing schedule"""
-        return self.read_state('fuzzing-schedule.json', default=[])
-    
-    # Fuzzing schedule v2 operations
-    def add_to_fuzzing_schedule_v2(self, commit_hash: str) -> None:
-        """Add commit to fuzzing schedule v2"""
-        def update(schedule):
-            schedule = schedule if isinstance(schedule, list) else []
-            # Check if already exists
-            if not any(c.get('hash') == commit_hash for c in schedule):
-                schedule.append({'hash': commit_hash, 'fuzz_count': 0})
-            return schedule
-        self.update_state('fuzzing-schedulev2.json', update, default=[])
-    
-    def remove_from_fuzzing_schedule_v2(self, commit_hash: str) -> bool:
-        """Remove commit from fuzzing schedule v2. Returns True if removed, False if not found."""
-        def update(schedule):
-            schedule = schedule if isinstance(schedule, list) else []
-            return [c for c in schedule if c.get('hash') != commit_hash]
-        schedule_before = self.get_fuzzing_schedule_v2()
-        self.update_state('fuzzing-schedulev2.json', update, default=[])
-        return any(c.get('hash') == commit_hash for c in schedule_before)
-    
-    def select_and_increment_least_fuzzed_v2(self) -> Optional[str]:
-        """Atomically select least-fuzzed commit from fuzzing schedule v2 and increment its fuzz_count.
-        Returns the commit hash, or None if schedule is empty.
-        When all commits have the same fuzz_count, selects the oldest (first in list)."""
-        def update(schedule):
-            schedule = schedule if isinstance(schedule, list) else []
-            if not schedule:
-                return schedule
-            
-            # Find minimum fuzz_count
-            min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule)
-            
-            # Find first commit with minimum fuzz_count (oldest among least-fuzzed)
-            for commit_info in schedule:
-                if commit_info.get('fuzz_count', 0) == min_fuzz_count:
-                    commit_info['fuzz_count'] = commit_info.get('fuzz_count', 0) + 1
-                    return schedule
-            
-            # Fallback (shouldn't happen)
-            if schedule:
-                schedule[0]['fuzz_count'] = schedule[0].get('fuzz_count', 0) + 1
-            return schedule
+    def get_fuzzing_schedule(self, version: Optional[str] = None) -> list:
+        """Get fuzzing schedule (versioned).
         
-        schedule_before = self.get_fuzzing_schedule_v2()
-        if not schedule_before:
-            return None
+        Args:
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('fuzzing-schedule.json', version)
+        return self.read_state(filename, default=[])
+    
+    # State operations (versioned core, defaults to DEFAULT_STATE_VERSION)
+    def update_last_checked_commit(self, commit_hash: str, version: Optional[str] = None) -> None:
+        """Update last checked commit in state file (versioned).
         
-        self.update_state('fuzzing-schedulev2.json', update, default=[])
+        Args:
+            commit_hash: Commit hash to store
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('state.json', version)
+        self.update_state(filename, lambda s: {'last_checked_commit': commit_hash}, default={'last_checked_commit': None})
+    
+    def get_last_checked_commit(self, version: Optional[str] = None) -> Optional[str]:
+        """Get last checked commit from state file (versioned).
         
-        # Find which commit was selected (one that had min fuzz_count before update)
-        min_fuzz_count = min(c.get('fuzz_count', 0) for c in schedule_before)
-        for commit_info in schedule_before:
-            if commit_info.get('fuzz_count', 0) == min_fuzz_count:
-                selected_commit = commit_info.get('hash')
-                return selected_commit
-        
-        return None
-    
-    def increment_fuzz_count_v2(self, commit_hash: str) -> bool:
-        """Increment fuzz_count for a commit in fuzzing schedule v2. Returns True if updated, False if not found.
-        This is idempotent - if called multiple times, it will keep incrementing."""
-        def update(schedule):
-            schedule = schedule if isinstance(schedule, list) else []
-            for commit in schedule:
-                if commit.get('hash') == commit_hash:
-                    commit['fuzz_count'] = commit.get('fuzz_count', 0) + 1
-                    return schedule
-            return schedule
-        schedule_before = self.get_fuzzing_schedule_v2()
-        self.update_state('fuzzing-schedulev2.json', update, default=[])
-        return any(c.get('hash') == commit_hash for c in schedule_before)
-    
-    def get_fuzzing_schedule_v2(self) -> list:
-        """Get fuzzing schedule v2"""
-        return self.read_state('fuzzing-schedulev2.json', default=[])
-    
-    # State operations
-    def update_last_checked_commit(self, commit_hash: str) -> None:
-        """Update last checked commit in state.json"""
-        self.update_state('state.json', lambda s: {'last_checked_commit': commit_hash}, default={'last_checked_commit': None})
-    
-    def get_last_checked_commit(self) -> Optional[str]:
-        """Get last checked commit from state.json"""
-        state = self.read_state('state.json', default={'last_checked_commit': None})
-        return state.get('last_checked_commit')
-    
-    # State v2 operations
-    def update_last_checked_commit_v2(self, commit_hash: str) -> None:
-        """Update last checked commit in statev2.json"""
-        self.update_state('statev2.json', lambda s: {'last_checked_commit': commit_hash}, default={'last_checked_commit': None})
-    
-    def get_last_checked_commit_v2(self) -> Optional[str]:
-        """Get last checked commit from statev2.json"""
-        state = self.read_state('statev2.json', default={'last_checked_commit': None})
+        Args:
+            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
+        """
+        version = version if version is not None else DEFAULT_STATE_VERSION
+        filename = self._get_versioned_filename('state.json', version)
+        state = self.read_state(filename, default={'last_checked_commit': None})
         return state.get('last_checked_commit')
     
     def get_latest_available_build(self) -> Optional[str]:
@@ -459,13 +453,16 @@ if __name__ == '__main__':
     parser.add_argument('solver', choices=['z3', 'cvc5'], help='Solver name')
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
-    # Build queue commands
-    build_queue_parser = subparsers.add_parser('build-queue', help='Build queue operations')
+    # Build queue commands (defaults to v2)
+    build_queue_parser = subparsers.add_parser('build-queue', help='Build queue operations (defaults to v2)')
     build_queue_sub = build_queue_parser.add_subparsers(dest='action')
     
     p = build_queue_sub.add_parser('add', help='Add commit to build queue')
     p.add_argument('commit', help='Commit hash')
     p = build_queue_sub.add_parser('remove', help='Remove commit from build queue')
+    p.add_argument('commit', help='Commit hash')
+    p = build_queue_sub.add_parser('clear', help='Clear build queue')
+    p = build_queue_sub.add_parser('check', help='Check if commit is in build queue')
     p.add_argument('commit', help='Commit hash')
     p = build_queue_sub.add_parser('move-to-built', help='Move commit from queue to built')
     p.add_argument('commit', help='Commit hash')
@@ -475,22 +472,8 @@ if __name__ == '__main__':
     p = build_queue_sub.add_parser('remove-from-built', help='Remove commit from built array')
     p.add_argument('commit', help='Commit hash')
     
-    # Build queue v2 commands
-    build_queue_v2_parser = subparsers.add_parser('build-queue-v2', help='Build queue v2 operations')
-    build_queue_v2_sub = build_queue_v2_parser.add_subparsers(dest='action')
-    
-    p = build_queue_v2_sub.add_parser('add', help='Add commit to build queue v2')
-    p.add_argument('commit', help='Commit hash')
-    p = build_queue_v2_sub.add_parser('clear', help='Clear build queue v2')
-    p = build_queue_v2_sub.add_parser('check', help='Check if commit is in build queue v2')
-    p.add_argument('commit', help='Commit hash')
-    p = build_queue_v2_sub.add_parser('move-to-built', help='Move commit from queue v2 to built')
-    p.add_argument('commit', help='Commit hash')
-    p = build_queue_v2_sub.add_parser('move-to-failed', help='Move commit from queue v2 to failed')
-    p.add_argument('commit', help='Commit hash')
-    
-    # Fuzzing schedule commands
-    fuzzing_parser = subparsers.add_parser('fuzzing-schedule', help='Fuzzing schedule operations')
+    # Fuzzing schedule commands (defaults to v2)
+    fuzzing_parser = subparsers.add_parser('fuzzing-schedule', help='Fuzzing schedule operations (defaults to v2)')
     fuzzing_sub = fuzzing_parser.add_subparsers(dest='action')
     
     p = fuzzing_sub.add_parser('add', help='Add commit to fuzzing schedule')
@@ -501,33 +484,13 @@ if __name__ == '__main__':
     p.add_argument('commit', help='Commit hash')
     fuzzing_sub.add_parser('get', help='Get fuzzing schedule')
     
-    # Fuzzing schedule v2 commands
-    fuzzing_v2_parser = subparsers.add_parser('fuzzing-schedule-v2', help='Fuzzing schedule v2 operations')
-    fuzzing_v2_sub = fuzzing_v2_parser.add_subparsers(dest='action')
-    
-    p = fuzzing_v2_sub.add_parser('add', help='Add commit to fuzzing schedule v2')
-    p.add_argument('commit', help='Commit hash')
-    p = fuzzing_v2_sub.add_parser('remove', help='Remove commit from fuzzing schedule v2')
-    p.add_argument('commit', help='Commit hash')
-    p = fuzzing_v2_sub.add_parser('increment-fuzz-count', help='Increment fuzz count for commit in v2')
-    p.add_argument('commit', help='Commit hash')
-    fuzzing_v2_sub.add_parser('get', help='Get fuzzing schedule v2')
-    
-    # State commands
-    state_parser = subparsers.add_parser('state', help='State operations')
+    # State commands (defaults to v2)
+    state_parser = subparsers.add_parser('state', help='State operations (defaults to v2)')
     state_sub = state_parser.add_subparsers(dest='action')
     
     p = state_sub.add_parser('update-last-checked', help='Update last checked commit')
     p.add_argument('commit', help='Commit hash')
     state_sub.add_parser('get-last-checked', help='Get last checked commit')
-    
-    # State v2 commands
-    state_v2_parser = subparsers.add_parser('state-v2', help='State v2 operations')
-    state_v2_sub = state_v2_parser.add_subparsers(dest='action')
-    
-    p = state_v2_sub.add_parser('update-last-checked', help='Update last checked commit in v2')
-    p.add_argument('commit', help='Commit hash')
-    state_v2_sub.add_parser('get-last-checked', help='Get last checked commit from v2')
     
     # Raw file operations (for debugging)
     raw_parser = subparsers.add_parser('raw', help='Raw file operations')
@@ -577,28 +540,41 @@ if __name__ == '__main__':
                 else:
                     print(f"⚠️  {args.commit} not found in built")
         
-        elif args.command == 'build-queue-v2':
+        elif args.command == 'build-queue':
             if args.action == 'add':
-                manager.add_to_build_queue_v2(args.commit)
-                print(f"✅ Added {args.commit} to build queue v2")
+                manager.add_to_build_queue(args.commit)
+                print(f"✅ Added {args.commit} to build queue")
+            elif args.action == 'remove':
+                if manager.remove_from_build_queue(args.commit):
+                    print(f"✅ Removed {args.commit} from build queue")
+                else:
+                    print(f"⚠️  {args.commit} not found in build queue")
             elif args.action == 'clear':
-                manager.clear_build_queue_v2()
-                print(f"✅ Cleared build queue v2")
+                manager.clear_build_queue()
+                print(f"✅ Cleared build queue")
             elif args.action == 'check':
-                if manager.is_in_build_queue_v2(args.commit):
+                if manager.is_in_build_queue(args.commit):
                     print("true")
                 else:
                     print("false")
             elif args.action == 'move-to-built':
-                if manager.move_to_built_v2(args.commit):
+                if manager.move_to_built(args.commit):
                     print(f"✅ Moved {args.commit} to built")
                 else:
                     print(f"⚠️  {args.commit} not found in queue")
             elif args.action == 'move-to-failed':
-                if manager.move_to_failed_v2(args.commit):
+                if manager.move_to_failed(args.commit):
                     print(f"✅ Moved {args.commit} to failed")
                 else:
                     print(f"⚠️  {args.commit} not found in queue")
+            elif args.action == 'get-built':
+                commits = manager.get_built_commits()
+                print(json.dumps(commits, indent=2))
+            elif args.action == 'remove-from-built':
+                if manager.remove_from_built(args.commit):
+                    print(f"✅ Removed {args.commit} from built")
+                else:
+                    print(f"⚠️  {args.commit} not found in built")
         
         elif args.command == 'fuzzing-schedule':
             if args.action == 'add':
@@ -618,38 +594,12 @@ if __name__ == '__main__':
                 schedule = manager.get_fuzzing_schedule()
                 print(json.dumps(schedule, indent=2))
         
-        elif args.command == 'fuzzing-schedule-v2':
-            if args.action == 'add':
-                manager.add_to_fuzzing_schedule_v2(args.commit)
-                print(f"✅ Added {args.commit} to fuzzing schedule v2")
-            elif args.action == 'remove':
-                if manager.remove_from_fuzzing_schedule_v2(args.commit):
-                    print(f"✅ Removed {args.commit} from fuzzing schedule v2")
-                else:
-                    print(f"⚠️  {args.commit} not found in fuzzing schedule v2")
-            elif args.action == 'increment-fuzz-count':
-                if manager.increment_fuzz_count_v2(args.commit):
-                    print(f"✅ Incremented fuzz count for {args.commit} in v2")
-                else:
-                    print(f"⚠️  {args.commit} not found in fuzzing schedule v2")
-            elif args.action == 'get':
-                schedule = manager.get_fuzzing_schedule_v2()
-                print(json.dumps(schedule, indent=2))
-        
         elif args.command == 'state':
             if args.action == 'update-last-checked':
                 manager.update_last_checked_commit(args.commit)
                 print(f"✅ Updated last checked commit to {args.commit}")
             elif args.action == 'get-last-checked':
                 commit = manager.get_last_checked_commit()
-                print(commit if commit else "None")
-        
-        elif args.command == 'state-v2':
-            if args.action == 'update-last-checked':
-                manager.update_last_checked_commit_v2(args.commit)
-                print(f"✅ Updated last checked commit to {args.commit} in v2")
-            elif args.action == 'get-last-checked':
-                commit = manager.get_last_checked_commit_v2()
                 print(commit if commit else "None")
         
         elif args.command == 'raw':
