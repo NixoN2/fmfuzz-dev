@@ -130,10 +130,12 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                 continue
         
         # When starting fresh (no last_checked), limit to last 4 commits with C++ changes
+        # Note: commits come from GitHub API in reverse chronological order (newest first)
+        # So [:4] gets the 4 newest commits with C++ changes
         if not last_checked and new_commits_with_cpp:
             if len(new_commits_with_cpp) > 4:
                 print(f"📋 Starting fresh: limiting to last 4 commits with C++ changes (found {len(new_commits_with_cpp)})")
-                new_commits_with_cpp = new_commits_with_cpp[-4:]  # Keep last 4
+                new_commits_with_cpp = new_commits_with_cpp[:4]  # Keep first 4 (newest)
         
         if new_commits_with_cpp:
             # Clear build queue when new commits arrive (optimization)
@@ -141,7 +143,8 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
             print("🧹 Cleared build queue")
             
             # Add ONLY the latest commit to build queue
-            latest_commit = new_commits_with_cpp[-1]  # Last in list is latest
+            # Commits are in reverse chronological order (newest first), so [0] is the latest
+            latest_commit = new_commits_with_cpp[0]  # First in list is latest (newest)
             try:
                 manager.add_to_build_queue(latest_commit)
                 print(f"✅ Added latest commit {latest_commit[:8]} to build queue")
