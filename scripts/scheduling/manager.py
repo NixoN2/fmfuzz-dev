@@ -128,25 +128,34 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
             
             # Add ALL commits with C++ changes directly to fuzzing schedule
             # Assumption: We'll have time to build latest commit and use it for next fuzzing
+            newly_added_commits = set()
             for commit in new_commits_with_cpp:
                 try:
                     manager.add_to_fuzzing_schedule(commit)
+                    newly_added_commits.add(commit)
                     print(f"✅ Added {commit[:8]} to fuzzing schedule")
                 except Exception as e:
                     print(f"❌ Error adding {commit[:8]} to fuzzing schedule: {e}", file=sys.stderr)
+        else:
+            newly_added_commits = set()
         
         manager.update_last_checked_commit(commits[0])
         print(f"✅ Updated last checked commit to {commits[0][:8]}")
     else:
         print("✅ No new commits to check")
+        newly_added_commits = set()
     
     # Clean up commits from fuzzing schedule if binaries are missing (7-day lifecycle)
+    # Skip binary check for commits that were just added (they haven't been built yet)
     schedule = manager.get_fuzzing_schedule()
     if boto3:
         from botocore.exceptions import ClientError
         commits_to_remove = []
         for commit_info in schedule:
             commit_hash = commit_info['hash']
+            # Skip binary check for commits that were just added in this run
+            if commit_hash in newly_added_commits:
+                continue
             try:
                 s3_key = f"solvers/{solver}/builds/production/{commit_hash}.tar.gz"
                 manager.s3_client.head_object(Bucket=manager.bucket, Key=s3_key)
