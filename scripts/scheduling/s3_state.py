@@ -152,7 +152,7 @@ class S3StateManager:
             if commit_hash not in queue.get('queue', []):
                 queue.setdefault('queue', []).append(commit_hash)
             return queue
-        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': []})
     
     def remove_from_build_queue(self, commit_hash: str, version: Optional[str] = None) -> bool:
         """Remove commit from build queue (versioned). Returns True if removed, False if not found.
@@ -163,86 +163,15 @@ class S3StateManager:
         """
         version = version if version is not None else DEFAULT_STATE_VERSION
         filename = self._get_versioned_filename('build-queue.json', version)
-        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
+        queue = self.read_state(filename, default={'queue': []})
         if commit_hash in queue.get('queue', []):
             queue['queue'].remove(commit_hash)
             self.write_state(filename, queue)
             return True
         return False
     
-    def move_to_built(self, commit_hash: str, version: Optional[str] = None) -> bool:
-        """Move commit from queue to built (versioned). Returns True if moved, False if not in queue.
-        
-        Args:
-            commit_hash: Commit hash to move
-            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
-        """
-        version = version if version is not None else DEFAULT_STATE_VERSION
-        filename = self._get_versioned_filename('build-queue.json', version)
-        def update(queue):
-            queue.setdefault('queue', [])
-            queue.setdefault('built', [])
-            if commit_hash in queue['queue']:
-                queue['queue'].remove(commit_hash)
-                if commit_hash not in queue['built']:
-                    queue['built'].append(commit_hash)
-            return queue
-        queue_before = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
-        was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
-        return was_in_queue
-    
-    def move_to_failed(self, commit_hash: str, version: Optional[str] = None) -> bool:
-        """Move commit from queue to failed (versioned). Returns True if moved, False if not in queue.
-        
-        Args:
-            commit_hash: Commit hash to move
-            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
-        """
-        version = version if version is not None else DEFAULT_STATE_VERSION
-        filename = self._get_versioned_filename('build-queue.json', version)
-        def update(queue):
-            queue.setdefault('queue', [])
-            queue.setdefault('failed', [])
-            if commit_hash in queue['queue']:
-                queue['queue'].remove(commit_hash)
-                if commit_hash not in queue['failed']:
-                    queue['failed'].append(commit_hash)
-            return queue
-        queue_before = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
-        was_in_queue = commit_hash in queue_before.get('queue', [])
-        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
-        return was_in_queue
-    
-    def get_built_commits(self, version: Optional[str] = None) -> list:
-        """Get list of commits in 'built' array (versioned).
-        
-        Args:
-            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
-        """
-        version = version if version is not None else DEFAULT_STATE_VERSION
-        filename = self._get_versioned_filename('build-queue.json', version)
-        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
-        return queue.get('built', [])
-    
-    def remove_from_built(self, commit_hash: str, version: Optional[str] = None) -> bool:
-        """Remove commit from built array (versioned). Returns True if removed, False if not found.
-        
-        Args:
-            commit_hash: Commit hash to remove
-            version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
-        """
-        version = version if version is not None else DEFAULT_STATE_VERSION
-        filename = self._get_versioned_filename('build-queue.json', version)
-        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
-        if commit_hash in queue.get('built', []):
-            queue['built'].remove(commit_hash)
-            self.write_state(filename, queue)
-            return True
-        return False
-    
     def clear_build_queue(self, version: Optional[str] = None) -> None:
-        """Clear build queue (versioned) - remove all commits from queue, keep built/failed.
+        """Clear build queue (versioned) - remove all commits from queue.
         
         Args:
             version: Version string (defaults to DEFAULT_STATE_VERSION, None for v1)
@@ -252,7 +181,7 @@ class S3StateManager:
         def update(queue):
             queue['queue'] = []
             return queue
-        self.update_state(filename, update, default={'queue': [], 'built': [], 'failed': []})
+        self.update_state(filename, update, default={'queue': []})
     
     def is_in_build_queue(self, commit_hash: str, version: Optional[str] = None) -> bool:
         """Check if commit is in build queue (versioned). Returns True if in queue, False otherwise.
@@ -263,7 +192,7 @@ class S3StateManager:
         """
         version = version if version is not None else DEFAULT_STATE_VERSION
         filename = self._get_versioned_filename('build-queue.json', version)
-        queue = self.read_state(filename, default={'queue': [], 'built': [], 'failed': []})
+        queue = self.read_state(filename, default={'queue': []})
         return commit_hash in queue.get('queue', [])
     
     # Fuzzing schedule operations (versioned core, defaults to DEFAULT_STATE_VERSION)
@@ -473,13 +402,6 @@ if __name__ == '__main__':
     p = build_queue_sub.add_parser('clear', help='Clear build queue')
     p = build_queue_sub.add_parser('check', help='Check if commit is in build queue')
     p.add_argument('commit', help='Commit hash')
-    p = build_queue_sub.add_parser('move-to-built', help='Move commit from queue to built')
-    p.add_argument('commit', help='Commit hash')
-    p = build_queue_sub.add_parser('move-to-failed', help='Move commit from queue to failed')
-    p.add_argument('commit', help='Commit hash')
-    build_queue_sub.add_parser('get-built', help='Get list of built commits')
-    p = build_queue_sub.add_parser('remove-from-built', help='Remove commit from built array')
-    p.add_argument('commit', help='Commit hash')
     
     # Fuzzing schedule commands (defaults to v2)
     fuzzing_parser = subparsers.add_parser('fuzzing-schedule', help='Fuzzing schedule operations (defaults to v2)')
@@ -541,7 +463,7 @@ if __name__ == '__main__':
                         sys.stdout.flush()
                     else:
                         # Debug: check what's actually in the queue
-                        queue = manager.read_state(manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION), default={'queue': [], 'built': [], 'failed': []})
+                        queue = manager.read_state(manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION), default={'queue': []})
                         queue_commits = queue.get('queue', [])
                         print(f"DEBUG: Checking commit {args.commit[:8]}", file=sys.stderr)
                         print(f"DEBUG: Queue has {len(queue_commits)} commit(s): {[c[:8] for c in queue_commits]}", file=sys.stderr)
@@ -552,24 +474,6 @@ if __name__ == '__main__':
                     print("false", file=sys.stdout)
                     sys.stdout.flush()
                     raise
-            elif args.action == 'move-to-built':
-                if manager.move_to_built(args.commit):
-                    print(f"✅ Moved {args.commit} to built")
-                else:
-                    print(f"⚠️  {args.commit} not found in queue")
-            elif args.action == 'move-to-failed':
-                if manager.move_to_failed(args.commit):
-                    print(f"✅ Moved {args.commit} to failed")
-                else:
-                    print(f"⚠️  {args.commit} not found in queue")
-            elif args.action == 'get-built':
-                commits = manager.get_built_commits()
-                print(json.dumps(commits, indent=2))
-            elif args.action == 'remove-from-built':
-                if manager.remove_from_built(args.commit):
-                    print(f"✅ Removed {args.commit} from built")
-                else:
-                    print(f"⚠️  {args.commit} not found in built")
         
         elif args.command == 'fuzzing-schedule':
             if args.action == 'add':

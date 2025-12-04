@@ -277,55 +277,12 @@ jobs:
         run: |
           echo "⚠️  Coverage build discarded - commit was removed from queue"
 
-  mark-as-built:
-    needs: [check-build-queue, build-static, build-static-coverage]
-    if: needs.build-static.result == 'success' && needs.build-static-coverage.result == 'success'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      
-      - name: Install dependencies
-        run: pip install boto3
-      
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v5.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      
-      - name: Move commit to built state
-        env:
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-        run: |
-          COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          # Verify commit is still in queue before marking as built
-          # Capture both stdout and stderr, but only use stdout for the check
-          CHECK_OUTPUT=$(python scripts/scheduling/s3_state.py z3 build-queue check "$COMMIT_HASH" 2>&1)
-          IN_QUEUE=$(echo "$CHECK_OUTPUT" | grep -E "^(true|false)$" | tail -1)
-          echo "DEBUG: Check output: $CHECK_OUTPUT"
-          echo "DEBUG: Extracted IN_QUEUE: '$IN_QUEUE'"
-          if [ "$IN_QUEUE" = "true" ]; then
-            python scripts/scheduling/s3_state.py z3 build-queue move-to-built $COMMIT_HASH
-            echo "✅ Moved commit $COMMIT_HASH to built state (both binaries uploaded)"
-          else
-            echo "⚠️  Commit $COMMIT_HASH was removed from queue, skipping mark-as-built"
-            echo "DEBUG: Full check output was: $CHECK_OUTPUT"
-          fi
-
-  mark-as-failed:
+  remove-from-queue:
     needs: [check-build-queue, build-static, build-static-coverage]
     if: |
-      always() &&
-      needs.check-build-queue.result == 'success' &&
-      (needs.build-static.result == 'failure' || needs.build-static-coverage.result == 'failure')
+      needs.build-static.result == 'success' &&
+      needs.build-static-coverage.result == 'success' &&
+      needs.check-build-queue.outputs.build_needed == 'true'
     runs-on: ubuntu-latest
     
     steps:
@@ -347,13 +304,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       
-      - name: Move commit to failed state
+      - name: Remove commit from build queue
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ needs.check-build-queue.outputs.sha }}"
-          python scripts/scheduling/s3_state.py z3 build-queue move-to-failed $COMMIT_HASH
-          echo "❌ Moved commit $COMMIT_HASH to failed state (one or both builds failed)"
+          python scripts/scheduling/s3_state.py z3 build-queue remove "$COMMIT_HASH"
+          echo "✅ Removed $COMMIT_HASH from build queue (both binaries uploaded)"
 
   skip-build:
     needs: check-build-queue

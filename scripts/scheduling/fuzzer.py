@@ -36,7 +36,7 @@ def get_least_fuzzed_commit(solver: str) -> Optional[str]:
 
 def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
     """Manage schedule size after fuzzing completes.
-    If schedule > 4 and all commits are unfuzzed, remove the commit we just fuzzed.
+    If schedule > 4, remove oldest fuzzed commit (fuzz_count > 0), or oldest if all are unfuzzed.
     
     NOTE: fuzz_count is now incremented atomically during selection (in run_fuzzer),
     so we don't increment it again here. This function only handles schedule management."""
@@ -63,13 +63,20 @@ def increment_fuzz_count_and_manage(solver: str, commit_hash: str) -> None:
     schedule_size = len(schedule)
     
     if schedule_size > 4:
-        # Check if all commits are unfuzzed (fuzz_count <= 1)
-        all_unfuzzed = all(c.get('fuzz_count', 0) <= 1 for c in schedule)
+        # Find oldest fuzzed commit (first in list with fuzz_count > 0)
+        oldest_fuzzed = None
+        for commit_info in schedule:
+            if commit_info.get('fuzz_count', 0) > 0:
+                oldest_fuzzed = commit_info['hash']
+                break
         
-        if all_unfuzzed:
-            print(f"📋 Schedule has {schedule_size} commits, all unfuzzed. Removing oldest: {commit_hash[:8]}")
-            manager.remove_from_fuzzing_schedule(commit_hash)
-            print(f"✅ Removed {commit_hash[:8]} from schedule")
+        # If no fuzzed commits found, remove oldest commit (first in list)
+        if not oldest_fuzzed:
+            oldest_fuzzed = schedule[0].get('hash')
+        
+        if oldest_fuzzed:
+            manager.remove_from_fuzzing_schedule(oldest_fuzzed)
+            print(f"✅ Removed oldest fuzzed commit {oldest_fuzzed[:8]} from schedule (schedule had {schedule_size} commits)")
 
 
 from typing import Tuple
@@ -86,9 +93,15 @@ def run_fuzzer(solver: str, verify_binary: bool = True) -> Tuple[Optional[str], 
         manager = get_state_manager(solver)
         
         # Step 1: Get commit to fuzz (oldest from schedule, FIFO)
+        schedule = manager.get_fuzzing_schedule()
+        if not schedule:
+            print("⏭️  No commits in fuzzing schedule", file=sys.stderr)
+            return None, None
+        
         commit_to_fuzz = manager.select_and_increment_least_fuzzed()
         if not commit_to_fuzz:
-            print("⏭️  No commits in fuzzing schedule", file=sys.stderr)
+            print(f"⚠️  Schedule has {len(schedule)} commit(s) but select_and_increment_least_fuzzed returned None", file=sys.stderr)
+            print(f"DEBUG: Schedule contents: {schedule}", file=sys.stderr)
             return None, None
         
         # Step 2: Get latest available build from S3

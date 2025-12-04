@@ -91,26 +91,8 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
         print(f"❌ Error getting commits: {e}", file=sys.stderr)
         sys.exit(1)
     
-    # Check built commits and move to fuzzing schedule (even if no new commits)
-    built_commits = manager.get_built_commits()
+    # Track NEW commits added from GitHub
     new_commits_added_to_schedule = []
-    if boto3:
-        from botocore.exceptions import ClientError
-        for commit in built_commits:
-            try:
-                s3_key = f"solvers/{solver}/builds/production/{commit}.tar.gz"
-                manager.s3_client.head_object(Bucket=manager.bucket, Key=s3_key)
-                manager.add_to_fuzzing_schedule(commit)
-                manager.remove_from_built(commit)
-                new_commits_added_to_schedule.append(commit)
-                print(f"✅ Moved {commit[:8]} to fuzzing schedule")
-            except ClientError as e:
-                if e.response.get('Error', {}).get('Code') == '404':
-                    print(f"⚠️  Binary not found for {commit[:8]}")
-                else:
-                    print(f"❌ Error processing {commit[:8]}: {e}", file=sys.stderr)
-            except Exception as e:
-                print(f"❌ Error processing {commit[:8]}: {e}", file=sys.stderr)
     
     # Process new commits from GitHub
     if commits:
@@ -138,10 +120,6 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                 new_commits_with_cpp = new_commits_with_cpp[:4]  # Keep first 4 (newest)
         
         if new_commits_with_cpp:
-            # Clear build queue when new commits arrive (optimization)
-            manager.clear_build_queue()
-            print("🧹 Cleared build queue")
-            
             # Add ONLY the latest commit to build queue
             # Commits are in reverse chronological order (newest first), so [0] is the latest
             latest_commit = new_commits_with_cpp[0]  # First in list is latest (newest)
@@ -152,57 +130,22 @@ def run_manager(solver: str, repo_url: str, token: Optional[str] = None):
                 print(f"❌ Error adding latest commit to build queue: {e}", file=sys.stderr)
             
             # Add ALL commits with C++ changes directly to fuzzing schedule
-            # Assumption: We'll have time to build latest commit and use it for next fuzzing
-            newly_added_commits = set()
             for commit in new_commits_with_cpp:
                 try:
                     manager.add_to_fuzzing_schedule(commit)
-                    newly_added_commits.add(commit)
+                    new_commits_added_to_schedule.append(commit)
                     print(f"✅ Added {commit[:8]} to fuzzing schedule")
                 except Exception as e:
                     print(f"❌ Error adding {commit[:8]} to fuzzing schedule: {e}", file=sys.stderr)
-        else:
-            newly_added_commits = set()
         
         manager.update_last_checked_commit(commits[0])
         print(f"✅ Updated last checked commit to {commits[0][:8]}")
     else:
         print("✅ No new commits to check")
-        newly_added_commits = set()
     
-    # Clean up commits from fuzzing schedule if binaries are missing (7-day lifecycle)
-    # Skip binary check for commits that were just added or are in build queue (being built)
-    schedule = manager.get_fuzzing_schedule()
-    if boto3:
-        from botocore.exceptions import ClientError
-        commits_to_remove = []
-        # Get current build queue to check if commits are being built
-        build_queue_filename = manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION)
-        build_queue = manager.read_state(build_queue_filename, default={'queue': [], 'built': [], 'failed': []})
-        build_queue_commits = set(build_queue.get('queue', []))
-        
-        for commit_info in schedule:
-            commit_hash = commit_info['hash']
-            # Skip binary check for commits that were just added in this run
-            if commit_hash in newly_added_commits:
-                continue
-            # Skip binary check for commits that are in build queue (being built)
-            if commit_hash in build_queue_commits:
-                continue
-            try:
-                s3_key = f"solvers/{solver}/builds/production/{commit_hash}.tar.gz"
-                manager.s3_client.head_object(Bucket=manager.bucket, Key=s3_key)
-            except ClientError as e:
-                if e.response.get('Error', {}).get('Code') == '404':
-                    commits_to_remove.append(commit_hash)
-                    print(f"⚠️  Binary missing for {commit_hash[:8]}, removing from schedule")
-        
-        for commit_hash in commits_to_remove:
-            manager.remove_from_fuzzing_schedule(commit_hash)
-        schedule = manager.get_fuzzing_schedule()
-    
-    # Manage fuzzing schedule size only when adding new commits
+    # Manage fuzzing schedule size when adding NEW commits from GitHub
     # If schedule has 4+ commits and we're adding new ones, remove oldest fuzzed commit
+    schedule = manager.get_fuzzing_schedule()
     if new_commits_added_to_schedule and len(schedule) >= 4:
         # Find oldest fuzzed commit (first in list with fuzz_count > 0)
         oldest_fuzzed = None
