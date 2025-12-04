@@ -134,12 +134,15 @@ jobs:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
-          IN_QUEUE=$(python scripts/scheduling/s3_state.py z3 build-queue check "$COMMIT_HASH" 2>&1 | tail -1)
+          # Capture both stdout and stderr, but extract only "true" or "false" from stdout
+          CHECK_OUTPUT=$(python scripts/scheduling/s3_state.py z3 build-queue check "$COMMIT_HASH" 2>&1)
+          IN_QUEUE=$(echo "$CHECK_OUTPUT" | grep -E "^(true|false)$" | tail -1)
           if [ "$IN_QUEUE" = "true" ]; then
             echo "✅ Commit $COMMIT_HASH is still in build queue, will upload"
             echo "should_upload=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️  Commit $COMMIT_HASH was removed from queue, discarding build"
+            echo "DEBUG: Check output: $CHECK_OUTPUT"
             echo "should_upload=false" >> $GITHUB_OUTPUT
           fi
       

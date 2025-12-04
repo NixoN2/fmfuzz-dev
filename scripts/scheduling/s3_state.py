@@ -530,48 +530,28 @@ if __name__ == '__main__':
                     print(f"✅ Removed {args.commit} from build queue")
                 else:
                     print(f"⚠️  {args.commit} not found in build queue")
-            elif args.action == 'move-to-built':
-                if manager.move_to_built(args.commit):
-                    print(f"✅ Moved {args.commit} to built")
-                else:
-                    print(f"⚠️  {args.commit} not found in queue")
-            elif args.action == 'move-to-failed':
-                if manager.move_to_failed(args.commit):
-                    print(f"✅ Moved {args.commit} to failed")
-                else:
-                    print(f"⚠️  {args.commit} not found in queue")
-            elif args.action == 'get-built':
-                commits = manager.get_built_commits()
-                print(json.dumps(commits, indent=2))
-            elif args.action == 'remove-from-built':
-                if manager.remove_from_built(args.commit):
-                    print(f"✅ Removed {args.commit} from built")
-                else:
-                    print(f"⚠️  {args.commit} not found in built")
-        
-        elif args.command == 'build-queue':
-            if args.action == 'add':
-                manager.add_to_build_queue(args.commit)
-                print(f"✅ Added {args.commit} to build queue")
-            elif args.action == 'remove':
-                if manager.remove_from_build_queue(args.commit):
-                    print(f"✅ Removed {args.commit} from build queue")
-                else:
-                    print(f"⚠️  {args.commit} not found in build queue")
             elif args.action == 'clear':
                 manager.clear_build_queue()
                 print(f"✅ Cleared build queue")
             elif args.action == 'check':
-                in_queue = manager.is_in_build_queue(args.commit)
-                if in_queue:
-                    print("true", file=sys.stdout)
-                else:
-                    # Debug: check what's actually in the queue
-                    queue = manager.read_state(manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION), default={'queue': [], 'built': [], 'failed': []})
-                    queue_commits = queue.get('queue', [])
-                    print(f"DEBUG: Checking commit {args.commit[:8]}", file=sys.stderr)
-                    print(f"DEBUG: Queue has {len(queue_commits)} commit(s): {[c[:8] for c in queue_commits]}", file=sys.stderr)
+                try:
+                    in_queue = manager.is_in_build_queue(args.commit)
+                    if in_queue:
+                        print("true", file=sys.stdout)
+                        sys.stdout.flush()
+                    else:
+                        # Debug: check what's actually in the queue
+                        queue = manager.read_state(manager._get_versioned_filename('build-queue.json', DEFAULT_STATE_VERSION), default={'queue': [], 'built': [], 'failed': []})
+                        queue_commits = queue.get('queue', [])
+                        print(f"DEBUG: Checking commit {args.commit[:8]}", file=sys.stderr)
+                        print(f"DEBUG: Queue has {len(queue_commits)} commit(s): {[c[:8] for c in queue_commits]}", file=sys.stderr)
+                        print("false", file=sys.stdout)
+                        sys.stdout.flush()
+                except Exception as e:
+                    print(f"ERROR in check: {e}", file=sys.stderr)
                     print("false", file=sys.stdout)
+                    sys.stdout.flush()
+                    raise
             elif args.action == 'move-to-built':
                 if manager.move_to_built(args.commit):
                     print(f"✅ Moved {args.commit} to built")
@@ -630,4 +610,15 @@ if __name__ == '__main__':
         
     except S3StateError as e:
         print(f"❌ Error: {e}", file=sys.stderr)
+        # If this was a check command, still output false
+        if hasattr(args, 'action') and args.action == 'check':
+            print("false", file=sys.stdout)
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        # If this was a check command, still output false
+        if hasattr(args, 'action') and args.action == 'check':
+            print("false", file=sys.stdout)
         sys.exit(1)
