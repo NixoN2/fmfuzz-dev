@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """Fuzzer job - selects least-fuzzed commit from fuzzing schedule"""
 
-import os
-import sys
 from typing import Optional
 
-scripts_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, scripts_dir)
-
-from scheduling.s3_state import get_state_manager, S3StateError
+from scripts.scheduling.s3_state import get_state_manager, S3StateError
 
 
 def get_least_fuzzed_commit(solver: str) -> Optional[str]:

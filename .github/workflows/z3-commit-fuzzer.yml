@@ -83,7 +83,7 @@ jobs:
             # Scheduled run OR workflow_dispatch without commit - use fuzzer to select
             # Capture stdout for result, stderr for debugging
             echo "🔍 Running fuzzer.py to select commit..."
-            python scripts/scheduling/fuzzer.py z3 select >/tmp/fuzzer_stdout.txt 2>/tmp/fuzzer_stderr.txt || true
+            PYTHONPATH="${{ github.workspace }}" python scripts/scheduling/fuzzer.py z3 select >/tmp/fuzzer_stdout.txt 2>/tmp/fuzzer_stderr.txt || true
             RESULT=$(cat /tmp/fuzzer_stdout.txt 2>/dev/null || echo "")
             STDERR_OUTPUT=$(cat /tmp/fuzzer_stderr.txt 2>/dev/null || echo "")
             echo "=== Fuzzer Debug Output ==="
