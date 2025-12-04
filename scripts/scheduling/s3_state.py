@@ -334,6 +334,8 @@ class S3StateManager:
         Lists all production builds and returns the most recent one (by LastModified timestamp).
         Returns None if no builds are available."""
         try:
+            from botocore.exceptions import ClientError
+            
             prefix = f"solvers/{self.solver}/builds/production/"
             
             # List all objects in the production builds directory
@@ -369,12 +371,17 @@ class S3StateManager:
                 print(f"✅ Found {found_count} build(s) in S3, latest: {latest_commit[:8] if latest_commit else 'None'}", file=sys.stderr)
             
             return latest_commit
-        except ClientError as e:
-            print(f"❌ S3 ClientError listing builds: {e}", file=sys.stderr)
-            raise S3StateError(f"Failed to list builds from S3: {e}")
         except Exception as e:
-            print(f"❌ Unexpected error finding latest build: {e}", file=sys.stderr)
-            raise S3StateError(f"Unexpected error finding latest build: {e}")
+            # Check if it's a ClientError
+            error_type = type(e).__name__
+            if 'ClientError' in error_type or 'NoCredentialsError' in error_type:
+                print(f"❌ S3 ClientError listing builds: {e}", file=sys.stderr)
+                raise S3StateError(f"Failed to list builds from S3: {e}")
+            else:
+                print(f"❌ Unexpected error finding latest build: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                raise S3StateError(f"Unexpected error finding latest build: {e}")
 
 
 def get_state_manager(solver: str) -> S3StateManager:

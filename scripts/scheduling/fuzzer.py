@@ -105,9 +105,13 @@ def run_fuzzer(solver: str, verify_binary: bool = True) -> Tuple[Optional[str], 
             return None, None
         
         # Step 2: Get latest available build from S3
-        latest_build = manager.get_latest_available_build()
-        if not latest_build:
-            print("⏭️  No builds available in S3", file=sys.stderr)
+        try:
+            latest_build = manager.get_latest_available_build()
+            if not latest_build:
+                print("⏭️  No builds available in S3", file=sys.stderr)
+                return None, None
+        except S3StateError as e:
+            print(f"❌ Error getting latest build: {e}", file=sys.stderr)
             return None, None
         
         if verify_binary:
