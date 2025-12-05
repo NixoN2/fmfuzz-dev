@@ -724,6 +724,7 @@ jobs:
       - name: Increment fuzz count and manage schedule
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           COMMIT_HASH="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
           python scripts/scheduling/fuzzer.py z3 increment $COMMIT_HASH
