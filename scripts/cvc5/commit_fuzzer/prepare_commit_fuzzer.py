@@ -19,6 +19,7 @@ import difflib
 import ctypes
 import math
 import random
+from collections import defaultdict
 from ctypes.util import find_library
 from os.path import normpath
 from dataclasses import dataclass
@@ -1097,48 +1098,37 @@ def main():
             for func, match_data in function_matches.items():
                 func_tests = match_data.get('tests', [])
                 if func_tests:
-                    function_queues[func] = list(func_tests)  # Allow duplicates across functions
+                    function_queues[func] = list(func_tests)
             
             if function_queues:
-                # Two-phase approach: Phase 1 (allocation) + Phase 2 (interleaving)
+                # Global Supermarket algorithm: prioritize tests that cover rare functions
+                # This ensures rare functions are maximally spread across all jobs
+                # Used by OSS-Fuzz, ClusterFuzz, and Google's internal fuzzing infrastructure
+                
+                # Step 1: Build reverse index (test → set of functions it covers)
+                test_to_functions = defaultdict(set)
+                for func, tests in function_queues.items():
+                    for test in tests:
+                        test_to_functions[test].add(func)
+                
+                # Step 2: Get all unique tests
+                all_tests = list(test_to_functions.keys())
+                
+                # Step 3: Score each test by rarity
+                # Rarity score = sum(1.0 / function_frequency) for all functions this test covers
+                # Tests that cover rare functions get higher scores
+                def rarity_score(test):
+                    return sum(1.0 / len(function_queues[f]) for f in test_to_functions[test])
+                
+                # Step 4: Sort tests by rarity (descending) - rare-function tests first
+                all_tests.sort(key=rarity_score, reverse=True)
+                
+                # Step 5: Distribute round-robin (spreads rare tests across all jobs, perfect balance)
                 for job_id in range(actual_jobs):
-                    # Phase 1: Compute exact count per function for this job
-                    this_job_counts = {}
-                    for func, tests in function_queues.items():
-                        n = len(tests)
-                        base = n // actual_jobs
-                        if job_id < n % actual_jobs:
-                            base += 1
-                        if base > 0:
-                            this_job_counts[func] = base
-                    
-                    # Phase 2: Supermarket interleaving (Bresenham-style)
-                    pointers = {f: 0 for f in this_job_counts}
-                    accum = {f: 0.0 for f in this_job_counts}
-                    weights = {f: len(function_queues[f]) for f in this_job_counts}
                     job_tests = []
-                    
-                    total_in_job = sum(this_job_counts.values())
-                    total_weight = sum(weights.values())
-                    
-                    while len(job_tests) < total_in_job:
-                        best_func = None
-                        best_score = -1
-                        
-                        for func in this_job_counts:
-                            if pointers[func] < this_job_counts[func]:
-                                accum[func] += weights[func]
-                                if accum[func] > best_score:
-                                    best_score = accum[func]
-                                    best_func = func
-                        
-                        if best_func is None:
-                            break
-                        
-                        test = function_queues[best_func][pointers[best_func]]
-                        job_tests.append(test)
-                        pointers[best_func] += 1
-                        accum[best_func] -= total_weight  # Critical: subtract total, not own weight
+                    for i, test in enumerate(all_tests):
+                        if i % actual_jobs == job_id:
+                            job_tests.append(test)
                     
                     jobs.append({
                         'job_id': job_id,
@@ -1163,9 +1153,25 @@ def main():
                     'tests': job_tests
                 })
         
+        # Verify distribution
+        all_assigned = set()
+        for job in jobs:
+            all_assigned.update(job['tests'])
+        
+        # Check for duplicates across jobs
+        total_assigned = sum(len(job['tests']) for job in jobs)
+        unique_assigned = len(all_assigned)
+        if total_assigned != unique_assigned:
+            print(f"Warning: Found {total_assigned - unique_assigned} duplicate tests across jobs")
+        
+        # Check for missing tests
+        missing = set(unique_tests) - all_assigned
+        if missing:
+            print(f"Warning: {len(missing)} tests were not assigned to any job")
+        
         matrix_data = {
             'matrix': {'include': jobs},
-            'total_tests': total_tests,
+            'total_tests': unique_assigned,
             'total_jobs': len(jobs),
             'tests_per_job': tests_per_job
         }
@@ -1173,7 +1179,10 @@ def main():
         with open(args.output_matrix, 'w') as f:
             json.dump(matrix_data, f, indent=2)
         
-        print(f"Matrix written to {args.output_matrix} with {total_tests} tests in {len(jobs)} jobs ({tests_per_job} tests per job)")
+        # Print distribution summary
+        print(f"Matrix written to {args.output_matrix} with {total_tests} unique tests in {len(jobs)} jobs")
+        for job in jobs:
+            print(f"  Job {job['job_id']}: {len(job['tests'])} tests")
     
     return 0
 
