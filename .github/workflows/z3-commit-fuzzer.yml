@@ -511,8 +511,8 @@ jobs:
               mkdir -p $HOME/.local/bin
               cp cvc5/build/bin/cvc5 $HOME/.local/bin/cvc5
               chmod +x $HOME/.local/bin/cvc5
-              # Prepend to PATH so S3 binary is used first
-              echo "$HOME/.local/bin:$PATH" >> $GITHUB_ENV
+              # Prepend to PATH so S3 binary is used first (GITHUB_PATH automatically prepends)
+              echo "$HOME/.local/bin" >> $GITHUB_PATH
               # Remove downloaded artifact to save space
               rm -f artifacts-cvc5/artifacts.tar.gz
               echo "cvc5_binary_available=true" >> $GITHUB_OUTPUT
@@ -534,7 +534,7 @@ jobs:
         run: |
           echo "⚠️ CVC5 binary from S3 not available, installing from GitHub releases as fallback"
           python3 scripts/download_cvc5.py $HOME/.local/bin
-          echo "$HOME/.local/bin:$PATH" >> $GITHUB_ENV
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Download latest production binary from S3
         id: download-production-binary

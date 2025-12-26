@@ -575,8 +575,8 @@ jobs:
               mkdir -p ${{ github.workspace }}/solvers
               cp z3/build/z3 ${{ github.workspace }}/solvers/z3
               chmod +x ${{ github.workspace }}/solvers/z3
-              # Prepend to PATH so S3 binary is used first
-              echo "${{ github.workspace }}/solvers:$PATH" >> $GITHUB_ENV
+              # Prepend to PATH so S3 binary is used first (GITHUB_PATH automatically prepends)
+              echo "${{ github.workspace }}/solvers" >> $GITHUB_PATH
               # Remove downloaded artifact to save space
               rm -f artifacts-z3/artifacts.tar.gz
               echo "z3_binary_available=true" >> $GITHUB_OUTPUT
