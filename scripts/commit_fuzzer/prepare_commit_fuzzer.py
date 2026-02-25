@@ -323,11 +323,13 @@ class PrepareCommitAnalyzer:
         current = cursor
         
         while current:
-            if current.kind in [clang.cindex.CursorKind.NAMESPACE, 
+            if current.kind in [clang.cindex.CursorKind.NAMESPACE,
                               clang.cindex.CursorKind.CLASS_DECL,
                               clang.cindex.CursorKind.STRUCT_DECL,
                               clang.cindex.CursorKind.FUNCTION_DECL,
-                              clang.cindex.CursorKind.CXX_METHOD]:
+                              clang.cindex.CursorKind.CXX_METHOD,
+                              clang.cindex.CursorKind.CONSTRUCTOR,
+                              clang.cindex.CursorKind.DESTRUCTOR]:
                 name = current.spelling
                 if name and name not in parts:
                     parts.append(name)
@@ -485,7 +487,8 @@ class PrepareCommitAnalyzer:
                             pass
                         return
                     
-                    if cursor_kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD]:
+                    if cursor_kind in [clang.cindex.CursorKind.FUNCTION_DECL, clang.cindex.CursorKind.CXX_METHOD,
+                                       clang.cindex.CursorKind.CONSTRUCTOR, clang.cindex.CursorKind.DESTRUCTOR]:
                         try:
                             is_def = n.is_definition()
                         except Exception:

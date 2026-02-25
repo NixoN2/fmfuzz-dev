@@ -358,6 +358,12 @@ jobs:
             echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
             echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
             echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+
+            if [ "$TOTAL_JOBS" = "0" ] && [ -n "$COMMIT_HASH" ]; then
+              echo "No tests found for $COMMIT_HASH — removing from fuzzing schedule"
+              python3 ${{ github.workspace }}/scripts/scheduling/s3_state.py \
+                --solver ${{ inputs.solver }} fuzzing remove "$COMMIT_HASH" || true
+            fi
           fi
 
 
