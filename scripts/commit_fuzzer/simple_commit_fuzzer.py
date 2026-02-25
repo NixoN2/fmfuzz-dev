@@ -64,8 +64,8 @@ class SimpleCommitFuzzer:
         self.solver_flags = self.solver_config.get("solver_flags", "")
         self.oracle_binary = Path(self.oracle_config["binary_path"])
         self.oracle_flags = self.oracle_config.get("solver_flags", "")
-        self.solver_cli = f"{self.solver_binary} {self.solver_flags}".strip()
-        self.oracle_cli = f"{self.oracle_binary} {self.oracle_flags}".strip()
+        self.solver_cli = f"{self._resolve_binary(self.solver_name, self.solver_binary)} {self.solver_flags}".strip()
+        self.oracle_cli = f"{self._resolve_binary(self.oracle_name, self.oracle_binary)} {self.oracle_flags}".strip()
 
         try:
             self.cpu_count = psutil.cpu_count()
@@ -107,10 +107,17 @@ class SimpleCommitFuzzer:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _resolve_binary(self, name: str, binary: Path) -> str:
+        if binary.exists():
+            return str(binary)
+        in_path = shutil.which(binary.name)
+        if in_path:
+            return in_path
+        raise ValueError(f"{name} not found at: {binary} (also not in PATH)")
+
     def _validate_solvers(self):
-        for name, binary in [(self.solver_name, self.solver_binary), (self.oracle_name, self.oracle_binary)]:
-            if not binary.exists() and not shutil.which(str(binary)):
-                raise ValueError(f"{name} not found at: {binary} (also not in PATH)")
+        self._resolve_binary(self.solver_name, self.solver_binary)
+        self._resolve_binary(self.oracle_name, self.oracle_binary)
 
     def _compute_time_remaining(self, job_start_time: float, stop_buffer_minutes: int) -> int:
         GITHUB_TIMEOUT = 21600
