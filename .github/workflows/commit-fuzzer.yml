@@ -15,7 +15,7 @@ on:
         type: string
       stop_buffer_minutes:
         required: false
-        type: number
+        type: string
     secrets:
       AWS_ACCESS_KEY_ID:
         required: true
