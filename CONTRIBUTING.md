@@ -10,10 +10,14 @@ scripts/
     solver.json       # solver configuration (required)
     build.sh          # build script (required)
   fuzzers/{name}/
-    fuzzer.json       # fuzzer configuration (required)
-    fuzzer.py         # fuzzer module — build_command() + parse_result() (required)
+    fuzzer.json       # CI configuration — name, description, setup script (required)
+    fuzzer.py         # Fuzzer class — command, dirs, exit codes, lifecycle (required)
+    setup.sh          # install/build the fuzzer tool (required if ci.setup_script set)
     requirements.txt  # pip dependencies (optional)
     __init__.py       # empty, makes it importable (required)
+  commit_fuzzer/
+    simple_commit_fuzzer.py  # generic runner — loads Fuzzer class via importlib
+    resource_monitor.py      # CPU/RAM monitoring and graceful shutdown
   scheduling/
     config.py         # reads solver.json and fuzzer.json, resolves parameters
   generate_workflows.py  # generates GitHub Actions dispatcher workflows
@@ -209,97 +213,145 @@ python3 -c "from scripts.scheduling.config import get_solver_config; import json
 
 ```
 scripts/fuzzers/{name}/
-  __init__.py        # empty file
-  fuzzer.json        # configuration
-  fuzzer.py          # module implementing build_command() and parse_result()
+  __init__.py        # empty file, makes it importable
+  fuzzer.json        # CI configuration (name, description, setup script)
+  fuzzer.py          # Fuzzer class with all runtime behavior
+  setup.sh           # install/build the fuzzer tool (if needed)
   requirements.txt   # pip dependencies (optional)
 ```
 
 ### 2. Create `fuzzer.json`
 
+This file is CI-only — it tells the workflow how to install the fuzzer tool:
+
 ```json
 {
   "name": "myfuzzer",
   "description": "What this fuzzer does",
-  "default_iterations": 100,
-  "default_timeout": 60,
   "ci": {
-    "install_repo": "https://github.com/org/myfuzzer.git"
+    "setup_script": "setup.sh"
   }
 }
 ```
 
-Every key starting with `default_` becomes a fuzzer parameter. The `default_` prefix is stripped and the value is passed to `build_command()` as a keyword argument.
-
-For example, `"default_iterations": 100` becomes `build_command(..., iterations=100)`.
-
-Solvers can override these via `fuzzer_overrides` in their `solver.json`, and users can override on the CLI with `--fuzzer-param iterations=500`.
+The `ci.setup_script` is a path relative to the fuzzer directory. The CI workflow runs `bash scripts/fuzzers/{name}/{setup_script}` to install the fuzzer tool before running.
 
 ### 3. Implement `fuzzer.py`
 
-The module must export two functions:
+The module must export a `Fuzzer` class. The runner instantiates it once per test and calls `execute()` → `collect()` → `parse_result()` → `cleanup()`.
 
 ```python
-from typing import List, Tuple
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 
-def build_command(
-    seed_path: str,
-    solver_clis: str,
-    bugs_dir: str,
-    scratch_dir: str,
-    log_dir: str,
-    **kwargs,
-) -> List[str]:
-    """Build the CLI command to run the fuzzer.
+class Fuzzer:
+    # Default parameter values — overridden by solver.json fuzzer_overrides
+    # and CLI --fuzzer-param flags
+    DEFAULT_PARAMS = {"iterations": 100, "timeout": 60}
 
-    Args:
-        seed_path: absolute path to the seed SMT file
-        solver_clis: semicolon-separated solver CLI strings
-                     (e.g. "z3 smt.threads=1;cvc5 --check-models")
-        bugs_dir: directory to write discovered bug files (.smt2)
-        scratch_dir: temporary working directory (cleaned up after each run)
-        log_dir: directory for fuzzer logs (cleaned up after each run)
-        **kwargs: fuzzer parameters from fuzzer.json default_* values,
-                  solver fuzzer_overrides, and --fuzzer-param CLI overrides
-
-    Returns:
-        Command as a list of strings for subprocess.run()
-    """
-    iterations = kwargs.get("iterations", 100)
-    timeout = kwargs.get("timeout", 60)
-
-    return [
+    # Command template — tokens are formatted with params + dir paths + seed_path
+    DEFAULT_COMMAND = [
         "myfuzzer",
-        "--iterations", str(iterations),
-        "--timeout", str(timeout),
-        "--bugs", bugs_dir,
-        "--scratch", scratch_dir,
-        solver_clis,
-        seed_path,
+        "--iterations", "{iterations}",
+        "--timeout", "{timeout}",
+        "--bugs", "{bugs_dir}",
+        "--scratch", "{scratch_dir}",
+        "{solver_clis}",
+        "{seed_path}",
     ]
 
+    # Exit code → (bug_found, action) mapping
+    # action: 'requeue' | 'remove' | 'continue'
+    DEFAULT_EXIT_CODES = {
+        "0":  {"bug_found": False, "action": "requeue"},
+        "3":  {"bug_found": False, "action": "remove"},
+        "10": {"bug_found": True,  "action": "requeue"},
+    }
+    DEFAULT_EXIT_ACTION = {"bug_found": False, "action": "continue"}
 
-def parse_result(exit_code: int, bugs_dir: str) -> Tuple[bool, str]:
-    """Interpret the fuzzer's exit code.
+    # Working directories — type 'output' dirs are kept (bugs accumulate);
+    # type 'temp' dirs are deleted after each run in cleanup()
+    DEFAULT_DIRS = {
+        "bugs_dir":    {"path": "bugs/worker_{worker_id}", "type": "output"},
+        "scratch_dir": {"path": "scratch_{worker_id}",     "type": "temp"},
+    }
 
-    Args:
-        exit_code: process exit code
-        bugs_dir: directory where bug files were written
+    # Glob patterns for collecting bug files from output dirs
+    DEFAULT_BUG_PATTERNS = ["*.smt2", "*.smt"]
 
-    Returns:
-        (bug_found, exit_action) where exit_action is one of:
-          - 'requeue': test produced results, run it again
-          - 'remove': test is unsupported, don't run again
-          - 'continue': test finished, move to next
-    """
-    if exit_code == 0:
-        return False, 'requeue'
-    # Define your fuzzer's exit codes here
-    return False, 'continue'
+    # Separator between solver_cli and oracle_cli in the {solver_clis} token
+    DEFAULT_SOLVER_CLIS_SEPARATOR = ";"
+
+    def __init__(
+        self,
+        worker_id: int,
+        seed_path: str,
+        solver_cli: str,
+        oracle_cli: str,
+        params_override: Optional[Dict] = None,
+    ):
+        params = {**self.DEFAULT_PARAMS, **(params_override or {})}
+
+        self.dirs = {
+            name: {"path": Path(cfg["path"].format(worker_id=worker_id)), "type": cfg["type"]}
+            for name, cfg in self.DEFAULT_DIRS.items()
+        }
+
+        ctx = {
+            **params,
+            "seed_path": seed_path,
+            "solver_cli": solver_cli,
+            "oracle_cli": oracle_cli,
+            "solver_clis": self.DEFAULT_SOLVER_CLIS_SEPARATOR.join([solver_cli, oracle_cli]),
+            "worker_id": str(worker_id),
+        }
+        ctx.update({name: str(info["path"]) for name, info in self.dirs.items()})
+        self.cmd = [token.format_map(ctx) for token in self.DEFAULT_COMMAND]
+
+        for info in self.dirs.values():
+            info["path"].mkdir(parents=True, exist_ok=True)
+
+    def execute(self, timeout: Optional[float] = None) -> Tuple[int, float]:
+        start = time.time()
+        try:
+            kwargs: Dict = {"capture_output": True, "text": True}
+            if timeout and timeout > 0:
+                kwargs["timeout"] = timeout
+            result = subprocess.run(self.cmd, **kwargs)
+            return result.returncode, time.time() - start
+        except subprocess.TimeoutExpired:
+            return -1, time.time() - start
+        except Exception:
+            return -1, time.time() - start
+
+    def collect(self) -> List[Path]:
+        files = []
+        for info in self.dirs.values():
+            if info["type"] == "output" and info["path"].exists():
+                for pattern in self.DEFAULT_BUG_PATTERNS:
+                    files.extend(info["path"].glob(pattern))
+        return files
+
+    def parse_result(self, exit_code: int) -> Tuple[bool, str]:
+        entry = self.DEFAULT_EXIT_CODES.get(str(exit_code), self.DEFAULT_EXIT_ACTION)
+        return entry["bug_found"], entry["action"]
+
+    def cleanup(self):
+        for info in self.dirs.values():
+            if info["type"] == "temp":
+                shutil.rmtree(info["path"], ignore_errors=True)
 ```
 
-**Important:** Accept `**kwargs` in `build_command()` so the system can pass arbitrary parameters from config without the fuzzer needing to know about all of them upfront.
+**Key design points:**
+
+- All defaults live as class constants — override only what differs from `typefuzz`
+- `DEFAULT_COMMAND` tokens are formatted with params + dir paths; add/remove tokens freely
+- `DEFAULT_DIRS` controls what directories exist and whether they're kept (`output`) or cleaned (`temp`) after each run
+- `DEFAULT_SOLVER_CLIS_SEPARATOR` controls how solver and oracle CLIs are joined into `{solver_clis}`; change if your fuzzer uses a different format
 
 ### 4. Add `requirements.txt` (if needed)
 
@@ -347,11 +399,11 @@ python3 -c "from scripts.scheduling.config import get_fuzzer_params; print(get_f
 
 Fuzzer parameters are resolved in this order (later overrides earlier):
 
-1. **`fuzzer.json`** `default_*` keys (e.g. `default_iterations: 250`)
+1. **`Fuzzer.DEFAULT_PARAMS`** — class constant in `fuzzer.py` (e.g. `{"iterations": 250}`)
 2. **`solver.json`** `fuzzer_overrides` (e.g. `fuzzer_overrides.iterations: 500`)
 3. **CLI** `--fuzzer-param` flags (e.g. `--fuzzer-param iterations=1000`)
 
-The resolved parameters are passed as `**kwargs` to `build_command()`.
+The resolved parameters are merged and passed as `params_override` to `Fuzzer.__init__()`, which applies them on top of `DEFAULT_PARAMS`.
 
 ---
 
@@ -368,8 +420,9 @@ The resolved parameters are passed as `**kwargs` to `build_command()`.
 ### New Fuzzer
 
 - [ ] `scripts/fuzzers/{name}/__init__.py` (empty)
-- [ ] `scripts/fuzzers/{name}/fuzzer.json` with `default_*` parameters
-- [ ] `scripts/fuzzers/{name}/fuzzer.py` with `build_command()` and `parse_result()`
+- [ ] `scripts/fuzzers/{name}/fuzzer.json` with `name`, `description`, `ci.setup_script`
+- [ ] `scripts/fuzzers/{name}/fuzzer.py` with `Fuzzer` class and all `DEFAULT_*` constants
+- [ ] `scripts/fuzzers/{name}/setup.sh` to install the fuzzer tool (if `ci.setup_script` set)
 - [ ] `scripts/fuzzers/{name}/requirements.txt` (if pip dependencies needed)
 - [ ] Point at least one solver to the fuzzer via `default_fuzzer`
 - [ ] Verify fuzzer discovery and parameter resolution

@@ -1,10 +1,7 @@
 {
   "name": "typefuzz",
   "description": "Type-aware SMT formula mutation",
-  "default_iterations": 250,
-  "default_modulo": 2,
-  "default_timeout": 120,
   "ci": {
-    "install_repo": "https://github.com/testsmt/yinyang.git"
+    "setup_script": "setup.sh"
   }
 }

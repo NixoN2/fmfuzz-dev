@@ -410,7 +410,7 @@ jobs:
           FUZZER=$(jq -r '.default_fuzzer' $CONFIG)
           echo "fuzzer=$FUZZER" >> $GITHUB_OUTPUT
           FUZZER_CONFIG="scripts/fuzzers/$FUZZER/fuzzer.json"
-          echo "fuzzer_install_repo=$(jq -r '.ci.install_repo // ""' $FUZZER_CONFIG)" >> $GITHUB_OUTPUT
+          echo "fuzzer_setup_script=$(jq -r '.ci.setup_script // ""' $FUZZER_CONFIG)" >> $GITHUB_OUTPUT
 
       - name: Install system dependencies
         run: |
@@ -426,19 +426,15 @@ jobs:
       - name: Install fuzzing dependencies
         run: |
           FUZZER="${{ steps.config.outputs.fuzzer }}"
-          FUZZER_INSTALL_REPO="${{ steps.config.outputs.fuzzer_install_repo }}"
+          FUZZER_SETUP_SCRIPT="${{ steps.config.outputs.fuzzer_setup_script }}"
 
           REQUIREMENTS="scripts/fuzzers/$FUZZER/requirements.txt"
           if [ -f "$REQUIREMENTS" ]; then
             pip install -r "$REQUIREMENTS"
           fi
           pip install psutil requests
-          if [ -n "$FUZZER_INSTALL_REPO" ]; then
-            REPO_DIR=$(basename "$FUZZER_INSTALL_REPO" .git)
-            git clone "$FUZZER_INSTALL_REPO"
-            cd "$REPO_DIR"
-            pip install -e .
-            cd ..
+          if [ -n "$FUZZER_SETUP_SCRIPT" ]; then
+            bash "scripts/fuzzers/$FUZZER/$FUZZER_SETUP_SCRIPT"
           fi
           pip cache purge || true
 

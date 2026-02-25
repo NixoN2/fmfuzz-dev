@@ -1,71 +1,94 @@
-"""Typefuzz fuzzer plugin.
+"""Typefuzz (yinyang) fuzzer — type-aware SMT formula mutation."""
 
-Typefuzz (yinyang) performs type-aware mutations on SMT formulas.
-It takes a seed SMT file, generates mutants, and tests them against
-one or more solvers to detect soundness bugs.
-"""
-
+import shutil
+import subprocess
+import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
-def build_command(
-    seed_path: str,
-    solver_clis: str,
-    bugs_dir: str,
-    scratch_dir: str,
-    log_dir: str,
-    iterations: int,
-    modulo: int,
-    timeout: int,
-) -> List[str]:
-    """Build the typefuzz CLI command.
-
-    Args:
-        seed_path: path to the seed SMT file
-        solver_clis: semicolon-separated solver CLI strings
-        bugs_dir: directory to write bug files
-        scratch_dir: temporary working directory
-        log_dir: directory for fuzzer logs
-        iterations: mutation iterations per seed
-        modulo: modulo parameter for typefuzz -m flag
-        timeout: per-solver timeout in seconds
-
-    Returns:
-        Command list for subprocess.run
-    """
-    return [
+class Fuzzer:
+    DEFAULT_PARAMS = {"iterations": 250, "modulo": 2, "timeout": 120}
+    DEFAULT_COMMAND = [
         "typefuzz",
-        "-i", str(iterations),
-        "-m", str(modulo),
-        "--timeout", str(timeout),
-        "--bugs", str(bugs_dir),
-        "--scratch", str(scratch_dir),
-        "--logfolder", str(log_dir),
-        solver_clis,
-        str(seed_path),
+        "-i", "{iterations}",
+        "-m", "{modulo}",
+        "--timeout", "{timeout}",
+        "--bugs", "{bugs_dir}",
+        "--scratch", "{scratch_dir}",
+        "--logfolder", "{log_dir}",
+        "{solver_clis}",
+        "{seed_path}",
     ]
+    DEFAULT_EXIT_CODES = {
+        "10": {"bug_found": True,  "action": "requeue"},
+        "3":  {"bug_found": False, "action": "remove"},
+        "0":  {"bug_found": False, "action": "requeue"},
+    }
+    DEFAULT_EXIT_ACTION = {"bug_found": False, "action": "continue"}
+    DEFAULT_DIRS = {
+        "bugs_dir":    {"path": "bugs/worker_{worker_id}", "type": "output"},
+        "scratch_dir": {"path": "scratch_{worker_id}",     "type": "temp"},
+        "log_dir":     {"path": "logs_{worker_id}",        "type": "temp"},
+    }
+    DEFAULT_BUG_PATTERNS = ["*.smt2", "*.smt"]
+    DEFAULT_SOLVER_CLIS_SEPARATOR = ";"
 
+    def __init__(
+        self,
+        worker_id: int,
+        seed_path: str,
+        solver_cli: str,
+        oracle_cli: str,
+        params_override: Optional[Dict] = None,
+    ):
+        params = {**self.DEFAULT_PARAMS, **(params_override or {})}
 
-def parse_result(exit_code: int, bugs_dir: str) -> Tuple[bool, str]:
-    """Interpret the typefuzz exit code.
+        self.dirs = {
+            name: {"path": Path(cfg["path"].format(worker_id=worker_id)), "type": cfg["type"]}
+            for name, cfg in self.DEFAULT_DIRS.items()
+        }
 
-    Args:
-        exit_code: process exit code
-        bugs_dir: directory where bug files were written
+        ctx = {
+            **params,
+            "seed_path": seed_path,
+            "solver_cli": solver_cli,
+            "oracle_cli": oracle_cli,
+            "solver_clis": self.DEFAULT_SOLVER_CLIS_SEPARATOR.join([solver_cli, oracle_cli]),
+            "worker_id": str(worker_id),
+        }
+        ctx.update({name: str(info["path"]) for name, info in self.dirs.items()})
+        self.cmd = [token.format_map(ctx) for token in self.DEFAULT_COMMAND]
 
-    Returns:
-        (bug_found, exit_action) where exit_action is one of:
-        'requeue', 'remove', 'continue'
-    """
-    # Exit code 10: bugs found
-    if exit_code == 10:
-        return True, 'requeue'
-    # Exit code 3: unsupported operation (seed uses features the solver can't handle)
-    elif exit_code == 3:
-        return False, 'remove'
-    # Exit code 0: no bugs found, normal completion
-    elif exit_code == 0:
-        return False, 'requeue'
-    # Any other exit code: error, skip this seed
-    return False, 'continue'
+        for info in self.dirs.values():
+            info["path"].mkdir(parents=True, exist_ok=True)
+
+    def execute(self, timeout: Optional[float] = None) -> Tuple[int, float]:
+        start = time.time()
+        try:
+            kwargs: Dict = {"capture_output": True, "text": True}
+            if timeout and timeout > 0:
+                kwargs["timeout"] = timeout
+            result = subprocess.run(self.cmd, **kwargs)
+            return result.returncode, time.time() - start
+        except subprocess.TimeoutExpired:
+            return -1, time.time() - start
+        except Exception:
+            return -1, time.time() - start
+
+    def collect(self) -> List[Path]:
+        files = []
+        for info in self.dirs.values():
+            if info["type"] == "output" and info["path"].exists():
+                for pattern in self.DEFAULT_BUG_PATTERNS:
+                    files.extend(info["path"].glob(pattern))
+        return files
+
+    def parse_result(self, exit_code: int) -> Tuple[bool, str]:
+        entry = self.DEFAULT_EXIT_CODES.get(str(exit_code), self.DEFAULT_EXIT_ACTION)
+        return entry["bug_found"], entry["action"]
+
+    def cleanup(self):
+        for info in self.dirs.values():
+            if info["type"] == "temp":
+                shutil.rmtree(info["path"], ignore_errors=True)
