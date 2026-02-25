@@ -1,0 +1,805 @@
+name: Commit Fuzzer
+
+on:
+  workflow_call:
+    inputs:
+      solver:
+        description: 'Solver name (must have solver.json config)'
+        required: true
+        type: string
+      commit_hash:
+        required: false
+        type: string
+      coverage_commit_hash:
+        required: false
+        type: string
+      stop_buffer_minutes:
+        required: false
+        type: number
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+jobs:
+  check-latest-build:
+    runs-on: ubuntu-latest
+    outputs:
+      fuzzing_needed: ${{ steps.set-outputs.outputs.fuzzing_needed }}
+      sha: ${{ steps.set-outputs.outputs.sha }}
+      commit_to_fuzz: ${{ steps.set-outputs.outputs.commit_to_fuzz }}
+      latest_build: ${{ steps.set-outputs.outputs.latest_build }}
+      is_manual_run: ${{ steps.set-outputs.outputs.is_manual_run }}
+      binary_available: ${{ steps.set-outputs.outputs.binary_available }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Get commit to fuzz and latest build
+        id: set-outputs
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          set +e  # Don't exit on error - handle errors gracefully
+
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.commit_hash }}" ]; then
+            COMMIT_TO_FUZZ="${{ inputs.commit_hash }}"
+            echo "Attempting to get latest build from S3..."
+            LATEST_BUILD=$(python -c "from scripts.scheduling.s3_state import get_state_manager; m = get_state_manager('$SOLVER'); print(m.get_latest_available_build() or '')" 2>&1)
+            LATEST_BUILD=$(echo "$LATEST_BUILD" | grep -E '^[a-f0-9]{40}$' | tail -1 || echo '')
+            if [ -z "$LATEST_BUILD" ]; then
+              echo "No latest build available, using provided commit as build"
+              LATEST_BUILD="$COMMIT_TO_FUZZ"
+            fi
+            echo "Using provided commit: $COMMIT_TO_FUZZ with build: $LATEST_BUILD"
+            echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
+            echo "commit_to_fuzz=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+            echo "latest_build=$LATEST_BUILD" >> $GITHUB_OUTPUT
+            echo "sha=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+            echo "is_manual_run=true" >> $GITHUB_OUTPUT
+            echo "binary_available=true" >> $GITHUB_OUTPUT
+          else
+            PYTHONPATH="${{ github.workspace }}" python scripts/scheduling/fuzzer.py $SOLVER select >/tmp/fuzzer_stdout.txt 2>/tmp/fuzzer_stderr.txt || true
+            RESULT=$(cat /tmp/fuzzer_stdout.txt 2>/dev/null || echo "")
+            if [ -n "$RESULT" ] && [ "$(echo "$RESULT" | wc -w)" -eq 2 ]; then
+              COMMIT_TO_FUZZ=$(echo "$RESULT" | awk '{print $1}')
+              LATEST_BUILD=$(echo "$RESULT" | awk '{print $2}')
+              echo "Found commit to fuzz: $COMMIT_TO_FUZZ, using latest build: $LATEST_BUILD"
+              echo "fuzzing_needed=true" >> $GITHUB_OUTPUT
+              echo "commit_to_fuzz=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+              echo "latest_build=$LATEST_BUILD" >> $GITHUB_OUTPUT
+              echo "sha=$COMMIT_TO_FUZZ" >> $GITHUB_OUTPUT
+              echo "is_manual_run=false" >> $GITHUB_OUTPUT
+              echo "binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "No commits in fuzzing schedule or no builds available"
+              echo "fuzzing_needed=false" >> $GITHUB_OUTPUT
+              echo "commit_to_fuzz=" >> $GITHUB_OUTPUT
+              echo "latest_build=" >> $GITHUB_OUTPUT
+              echo "sha=" >> $GITHUB_OUTPUT
+              echo "is_manual_run=false" >> $GITHUB_OUTPUT
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+  skip-fuzzing:
+    needs: check-latest-build
+    if: |
+      github.event_name == 'schedule' &&
+      (needs.check-latest-build.outputs.fuzzing_needed == 'false' || needs.check-latest-build.outputs.binary_available == 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip fuzzing
+        run: |
+          if [ "${{ needs.check-latest-build.outputs.fuzzing_needed }}" == "false" ]; then
+            echo "No builds available - skipping fuzzing"
+          else
+            echo "Production binary not available - skipping fuzzing"
+          fi
+
+  commit-fuzzer:
+    needs: check-latest-build
+    if: |
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'schedule' && needs.check-latest-build.outputs.fuzzing_needed == 'true' && needs.check-latest-build.outputs.binary_available == 'true')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.extract-tests.outputs.matrix }}
+      total_tests: ${{ steps.extract-tests.outputs.total_tests }}
+      total_jobs: ${{ steps.extract-tests.outputs.total_jobs }}
+      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          CONFIG="scripts/solvers/${{ inputs.solver }}/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "binary_path=$(jq -r '.binary_path' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "max_fuzzer_jobs=$(jq -r '.ci.max_fuzzer_jobs // 9' $CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Install LLVM/Clang 17
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '17'
+
+      - name: Add LLVM to PATH
+        run: echo "${{ env.LLVM_PATH }}/bin" >> $GITHUB_PATH
+
+      - name: Export LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ env.LLVM_PATH }}/lib" >> $GITHUB_ENV
+
+      - name: Install system development packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libc6-dev \
+            gcc \
+            g++ \
+            binutils \
+            libstdc++-14-dev \
+            libc++-dev \
+            libc++abi-dev \
+            zlib1g \
+            zlib1g-dev
+
+      - name: Install Python dependencies
+        run: |
+          pip install gitpython unidiff "libclang==17.0.6"
+
+      - name: Clone test repository
+        if: steps.config.outputs.test_repo_url != ''
+        run: |
+          TEST_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "Test directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.test_repo_url }}" "$TEST_DIR"
+          fi
+
+      - name: Clone solver repository
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -d "$SOLVER" ]; then
+            echo "Solver directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.repo_url }}" "$SOLVER"
+          fi
+
+      - name: Checkout commit to fuzz
+        working-directory: ${{ inputs.solver }}
+        run: |
+          COMMIT_TO_FUZZ="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
+          echo "Checking out commit to fuzz: $COMMIT_TO_FUZZ"
+          git fetch origin
+          git checkout $COMMIT_TO_FUZZ
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Get commit hash
+        id: get-commit
+        working-directory: ${{ inputs.solver }}
+        run: |
+          COMMIT_HASH=$(git rev-parse HEAD)
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download production binary from S3 (for headers and compile_commands.json)
+        id: download-production-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          LATEST_BUILD="${{ needs.check-latest-build.outputs.latest_build }}"
+          S3_KEY="solvers/${{ inputs.solver }}/builds/v2/production/${LATEST_BUILD}.tar.gz"
+
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" >/dev/null 2>&1; then
+            echo "Downloading production binary for latest build: $LATEST_BUILD"
+            aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz
+            echo "artifacts_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "WARNING: Production binary not found in S3 for $LATEST_BUILD, will build as fallback"
+            echo "artifacts_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract headers and compile_commands.json
+        id: extract-artifacts
+        if: steps.download-production-binary.outputs.artifacts_available == 'true'
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            ./scripts/shared/extract_build_artifacts.sh --solver $SOLVER artifacts/artifacts.tar.gz $SOLVER/build true
+            if [ -f "$SOLVER/build/compile_commands.json" ]; then
+              echo "Headers and compile_commands.json extracted successfully"
+              echo "artifacts_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "compile_commands.json extraction failed"
+              echo "artifacts_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "artifacts_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static binary (fallback for headers and compile_commands.json)
+        if: steps.extract-artifacts.outputs.artifacts_available != 'true'
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ ! -f "$SOLVER/build/compile_commands.json" ]; then
+            echo "Building static binary as fallback to get headers and compile_commands.json"
+            ./scripts/solvers/$SOLVER/build.sh --static
+          else
+            echo "Using artifacts from S3, skipping build"
+          fi
+
+      - name: Configure AWS credentials for coverage download
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download coverage map from S3
+        id: download-coverage
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -n "${{ inputs.coverage_commit_hash }}" ]; then
+            COVERAGE_COMMIT="${{ inputs.coverage_commit_hash }}"
+            S3_KEY="solvers/$SOLVER/coverage-mappings/coverage_mapping-${COVERAGE_COMMIT}.json.gz"
+
+            if aws s3api head-object \
+              --bucket ${{ secrets.AWS_S3_BUCKET }} \
+              --key "$S3_KEY" >/dev/null 2>&1; then
+              echo "Downloading coverage mapping for commit: ${COVERAGE_COMMIT}"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "Coverage mapping not found for commit: ${COVERAGE_COMMIT}"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Finding latest coverage mapping in S3..."
+            LATEST=$(aws s3 ls s3://${{ secrets.AWS_S3_BUCKET }}/solvers/$SOLVER/coverage-mappings/ \
+              | grep "coverage_mapping-" \
+              | sort -r \
+              | head -n 1 \
+              | awk '{print $4}' || echo "")
+
+            if [ -n "$LATEST" ]; then
+              echo "Downloading latest coverage mapping: $LATEST"
+              aws s3 cp \
+                s3://${{ secrets.AWS_S3_BUCKET }}/solvers/$SOLVER/coverage-mappings/$LATEST \
+                coverage_mapping.json.gz
+              echo "coverage_found=true" >> $GITHUB_OUTPUT
+              echo "coverage_file=$LATEST" >> $GITHUB_OUTPUT
+            else
+              echo "No coverage mappings found in S3"
+              echo "coverage_found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Extract coverage map
+        if: steps.download-coverage.outputs.coverage_found == 'true'
+        run: |
+          gunzip coverage_mapping.json.gz
+          ls -la coverage_mapping.json
+          echo "Coverage mapping extracted successfully"
+
+      - name: Coverage mapping not found
+        if: steps.download-coverage.outputs.coverage_found != 'true'
+        run: |
+          echo "Coverage mapping not found. Please run coverage mapper workflow first or specify a valid coverage_commit_hash."
+          exit 1
+
+      - name: Run Commit Fuzzer and create matrix
+        id: extract-tests
+        working-directory: ${{ inputs.solver }}
+        env:
+          SKIP_COVERAGE_ENFORCEMENT: "true"
+          COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
+        run: |
+          ${{ github.workspace }}/scripts/commit_fuzzer/run_prepare_commit_fuzzer.sh \
+            --solver ${{ inputs.solver }} \
+            --coverage-file ../coverage_mapping.json \
+            --compile-commands build \
+            --output-matrix fuzzer_matrix.json \
+            --max-jobs ${{ steps.config.outputs.max_fuzzer_jobs }} \
+            --commits 1
+
+          if [ ! -f "fuzzer_matrix.json" ]; then
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            echo "total_tests=0" >> $GITHUB_OUTPUT
+            echo "total_jobs=0" >> $GITHUB_OUTPUT
+          else
+            MATRIX=$(jq -c '.matrix' fuzzer_matrix.json)
+            TOTAL_TESTS=$(jq -r '.total_tests' fuzzer_matrix.json)
+            TOTAL_JOBS=$(jq -r '.total_jobs' fuzzer_matrix.json)
+
+            echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+            echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+            echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+          fi
+
+
+  fuzzer-jobs:
+    needs: [check-latest-build, commit-fuzzer]
+    if: needs.commit-fuzzer.result == 'success' && needs.commit-fuzzer.outputs.total_tests != '' && needs.commit-fuzzer.outputs.total_tests != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.commit-fuzzer.outputs.matrix) }}
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Record job start time
+        run: echo "$(date +%s)" > /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          CONFIG="scripts/solvers/$SOLVER/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "binary_path=$(jq -r '.binary_path' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_dir=$(jq -r '.test_dir' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
+
+          # Determine fuzzer tests root
+          TEST_REPO_DIR=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)
+          if [ -n "$TEST_REPO_DIR" ]; then
+            echo "fuzzer_tests_root=../$TEST_REPO_DIR" >> $GITHUB_OUTPUT
+          else
+            echo "fuzzer_tests_root=$(jq -r '.test_dir' $CONFIG)" >> $GITHUB_OUTPUT
+          fi
+
+          # Read oracle config
+          ORACLE=$(jq -r '.default_oracle' $CONFIG)
+          echo "oracle=$ORACLE" >> $GITHUB_OUTPUT
+          ORACLE_CONFIG="scripts/solvers/$ORACLE/solver.json"
+          echo "oracle_binary_path=$(jq -r '.binary_path' $ORACLE_CONFIG)" >> $GITHUB_OUTPUT
+          echo "oracle_fallback_pip=$(jq -r '.ci.oracle_fallback_pip // ""' $ORACLE_CONFIG)" >> $GITHUB_OUTPUT
+          echo "oracle_fallback_script=$(jq -r '.ci.oracle_fallback_script // ""' $ORACLE_CONFIG)" >> $GITHUB_OUTPUT
+
+          # Read fuzzer config
+          FUZZER=$(jq -r '.default_fuzzer' $CONFIG)
+          echo "fuzzer=$FUZZER" >> $GITHUB_OUTPUT
+          FUZZER_CONFIG="scripts/fuzzers/$FUZZER/fuzzer.json"
+          echo "fuzzer_install_repo=$(jq -r '.ci.install_repo // ""' $FUZZER_CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            unzip \
+            wget
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Install fuzzing dependencies
+        run: |
+          FUZZER="${{ steps.config.outputs.fuzzer }}"
+          FUZZER_INSTALL_REPO="${{ steps.config.outputs.fuzzer_install_repo }}"
+
+          REQUIREMENTS="scripts/fuzzers/$FUZZER/requirements.txt"
+          if [ -f "$REQUIREMENTS" ]; then
+            pip install -r "$REQUIREMENTS"
+          fi
+          pip install psutil requests
+          if [ -n "$FUZZER_INSTALL_REPO" ]; then
+            REPO_DIR=$(basename "$FUZZER_INSTALL_REPO" .git)
+            git clone "$FUZZER_INSTALL_REPO"
+            cd "$REPO_DIR"
+            pip install -e .
+            cd ..
+          fi
+          pip cache purge || true
+
+      - name: Download solver binaries
+        run: |
+          mkdir -p ${{ github.workspace }}/solvers
+
+      - name: Clone test repository
+        if: steps.config.outputs.test_repo_url != ''
+        run: |
+          TEST_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "Test directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.test_repo_url }}" "$TEST_DIR"
+          fi
+
+      - name: Clone solver repository
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -d "$SOLVER" ]; then
+            echo "Solver directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.repo_url }}" "$SOLVER"
+          fi
+
+      - name: Checkout same commit as first job
+        working-directory: ${{ inputs.solver }}
+        run: |
+          git fetch origin
+          git checkout ${{ needs.commit-fuzzer.outputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Clean up git repositories to save space
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          FUZZER_INSTALL_REPO="${{ steps.config.outputs.fuzzer_install_repo }}"
+
+          rm -rf $SOLVER/.git || true
+          if [ -n "$FUZZER_INSTALL_REPO" ]; then
+            REPO_DIR=$(basename "$FUZZER_INSTALL_REPO" .git)
+            rm -rf $REPO_DIR/.git || true
+          fi
+          TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -n "$TEST_REPO_DIR" ]; then
+            rm -rf $TEST_REPO_DIR/.git || true
+          fi
+          echo "Cleaned up git repositories"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Download latest production binary from S3
+        id: download-production-binary
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts
+          SOLVER="${{ inputs.solver }}"
+          LATEST_BUILD="${{ needs.check-latest-build.outputs.latest_build }}"
+          S3_KEY="solvers/$SOLVER/builds/v2/production/${LATEST_BUILD}.tar.gz"
+
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" 2>&1; then
+            echo "Binary exists in S3, downloading..."
+            if aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts/artifacts.tar.gz; then
+              echo "Binary downloaded successfully"
+              ls -lh artifacts/artifacts.tar.gz
+              echo "binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "Binary download failed"
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "WARNING: Production binary not found in S3 at key: $S3_KEY"
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract production binary
+        id: extract-production-binary
+        if: steps.download-production-binary.outputs.binary_available == 'true'
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -f "artifacts/artifacts.tar.gz" ]; then
+            mkdir -p $SOLVER/build
+            ./scripts/shared/extract_build_artifacts.sh --solver $SOLVER artifacts/artifacts.tar.gz $SOLVER/build false
+            if [ -f "$SOLVER/${{ steps.config.outputs.binary_path }}" ]; then
+              echo "Production binary extracted successfully"
+              rm -f artifacts/artifacts.tar.gz
+              echo "binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "Binary extraction failed"
+              echo "binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build static binary (fallback)
+        if: steps.extract-production-binary.outputs.binary_available != 'true'
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          BINARY_PATH="$SOLVER/${{ steps.config.outputs.binary_path }}"
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "Building static binary as fallback (binary not available from S3)"
+            ./scripts/solvers/$SOLVER/build.sh --static
+          else
+            echo "Using binary from S3, skipping build"
+          fi
+
+      - name: Get oracle latest build from S3
+        id: get-oracle-build
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+        run: |
+          ORACLE="${{ steps.config.outputs.oracle }}"
+          echo "Getting latest $ORACLE build from S3..."
+          LATEST_ORACLE_BUILD=$(python -c "from scripts.scheduling.s3_state import get_state_manager; m = get_state_manager('$ORACLE'); print(m.get_latest_available_build() or '')" 2>&1)
+          LATEST_ORACLE_BUILD=$(echo "$LATEST_ORACLE_BUILD" | grep -E '^[a-f0-9]{40}$' | tail -1 || echo '')
+          if [ -z "$LATEST_ORACLE_BUILD" ]; then
+            echo "No latest $ORACLE build available"
+            echo "oracle_build_available=false" >> $GITHUB_OUTPUT
+          else
+            echo "Latest $ORACLE build: $LATEST_ORACLE_BUILD"
+            echo "oracle_build=$LATEST_ORACLE_BUILD" >> $GITHUB_OUTPUT
+            echo "oracle_build_available=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download oracle production binary from S3
+        id: download-oracle-binary
+        if: steps.get-oracle-build.outputs.oracle_build_available == 'true'
+        continue-on-error: true
+        run: |
+          ORACLE="${{ steps.config.outputs.oracle }}"
+          mkdir -p artifacts-oracle
+          LATEST_ORACLE_BUILD="${{ steps.get-oracle-build.outputs.oracle_build }}"
+          S3_KEY="solvers/$ORACLE/builds/v2/production/${LATEST_ORACLE_BUILD}.tar.gz"
+
+          if aws s3api head-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" 2>&1; then
+            echo "$ORACLE binary exists in S3, downloading..."
+            if aws s3 cp \
+              s3://${{ secrets.AWS_S3_BUCKET }}/$S3_KEY \
+              artifacts-oracle/artifacts.tar.gz; then
+              echo "$ORACLE binary downloaded successfully"
+              echo "oracle_binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "$ORACLE binary download failed"
+              echo "oracle_binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "WARNING: $ORACLE production binary not found in S3"
+            echo "oracle_binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract oracle production binary
+        id: extract-oracle-binary
+        if: steps.download-oracle-binary.outputs.oracle_binary_available == 'true'
+        run: |
+          ORACLE="${{ steps.config.outputs.oracle }}"
+          ORACLE_BINARY_PATH="${{ steps.config.outputs.oracle_binary_path }}"
+          if [ -f "artifacts-oracle/artifacts.tar.gz" ]; then
+            mkdir -p $ORACLE/build
+            ./scripts/shared/extract_build_artifacts.sh --solver $ORACLE artifacts-oracle/artifacts.tar.gz $ORACLE/build false
+            if [ -f "$ORACLE/$ORACLE_BINARY_PATH" ]; then
+              echo "$ORACLE production binary extracted successfully"
+              mkdir -p $HOME/.local/bin
+              cp "$ORACLE/$ORACLE_BINARY_PATH" "$HOME/.local/bin/$ORACLE"
+              chmod +x "$HOME/.local/bin/$ORACLE"
+              echo "$HOME/.local/bin" >> $GITHUB_PATH
+              rm -f artifacts-oracle/artifacts.tar.gz
+              echo "oracle_binary_available=true" >> $GITHUB_OUTPUT
+            else
+              echo "$ORACLE binary extraction failed"
+              echo "oracle_binary_available=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "oracle_binary_available=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install oracle as fallback
+        if: |
+          (steps.get-oracle-build.outputs.oracle_build_available != 'true') ||
+          (steps.download-oracle-binary.outputs.oracle_binary_available != 'true') ||
+          (steps.extract-oracle-binary.outputs.oracle_binary_available != 'true')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ORACLE="${{ steps.config.outputs.oracle }}"
+          ORACLE_FALLBACK_PIP="${{ steps.config.outputs.oracle_fallback_pip }}"
+          ORACLE_FALLBACK_SCRIPT="${{ steps.config.outputs.oracle_fallback_script }}"
+
+          echo "$ORACLE binary from S3 not available, installing fallback"
+          if [ -n "$ORACLE_FALLBACK_PIP" ]; then
+            pip install $ORACLE_FALLBACK_PIP
+          elif [ -n "$ORACLE_FALLBACK_SCRIPT" ]; then
+            python3 $ORACLE_FALLBACK_SCRIPT --solver $ORACLE $HOME/.local/bin
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+          else
+            echo "ERROR: No fallback method configured for oracle $ORACLE"
+            exit 1
+          fi
+
+      - name: Verify solver binaries
+        run: |
+          ORACLE="${{ steps.config.outputs.oracle }}"
+          SOLVER="${{ inputs.solver }}"
+          BINARY_PATH="${{ steps.config.outputs.binary_path }}"
+          $ORACLE --version
+          if [ -f "$SOLVER/$BINARY_PATH" ]; then
+            $SOLVER/$BINARY_PATH --version
+          fi
+
+      - name: Run Simple Fuzzer on assigned tests
+        working-directory: ${{ inputs.solver }}
+        run: |
+          JOB_START=$(cat /tmp/job_start_${GITHUB_RUN_ID}_${{ matrix.job_id }}.txt)
+
+          STOP_BUFFER=${{ inputs.stop_buffer_minutes || 5 }}
+
+          ${{ github.workspace }}/scripts/commit_fuzzer/simple_commit_fuzzer.py \
+            --solver ${{ inputs.solver }} \
+            --tests-json '${{ toJson(matrix.tests) }}' \
+            --job-id '${{ matrix.job_id }}' \
+            --tests-root '${{ steps.config.outputs.fuzzer_tests_root }}' \
+            --job-start-time "$JOB_START" \
+            --stop-buffer-minutes ${STOP_BUFFER}
+
+      - name: Upload bugs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bugs-job-${{ matrix.job_id }}
+          path: ${{ inputs.solver }}/bugs
+          retention-days: 1
+          if-no-files-found: ignore
+
+  collect-bugs:
+    needs: [commit-fuzzer, fuzzer-jobs]
+    if: always() && needs.commit-fuzzer.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download all bug artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bugs-artifacts
+          pattern: bugs-job-*
+          merge-multiple: false
+
+      - name: Combine all bugs
+        id: combine-bugs
+        run: |
+          mkdir -p combined-bugs
+
+          if [ -d "bugs-artifacts" ]; then
+            find bugs-artifacts -name "*.smt2" -type f -exec cp {} combined-bugs/ \; 2>/dev/null || true
+          else
+            echo "No bug artifacts directory found (no bugs were found in any job)"
+          fi
+
+          BUG_COUNT=$(find combined-bugs -name "*.smt2" -type f 2>/dev/null | wc -l || echo "0")
+          echo "Total bugs found: $BUG_COUNT"
+          echo "bug_count=$BUG_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$BUG_COUNT" -eq 0 ]; then
+            echo "No bugs found, skipping upload"
+            echo "bugs_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "bugs_found=true" >> $GITHUB_OUTPUT
+            echo "Bugs found:"
+            find combined-bugs -name "*.smt2" -type f | sort
+          fi
+
+      - name: Create bugs archive
+        id: create-archive
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          COMMIT_HASH="${{ needs.commit-fuzzer.outputs.commit_hash }}"
+          COMMIT_SHORT="${COMMIT_HASH:0:7}"
+          TIMESTAMP=$(date +%s)
+          ARCHIVE_NAME="bugs-${COMMIT_SHORT}-${TIMESTAMP}.tar.gz"
+          cd combined-bugs
+          tar -czf ../${ARCHIVE_NAME} .
+          cd ..
+          ARCHIVE_SIZE=$(du -h ${ARCHIVE_NAME} | cut -f1)
+          echo "Created archive: ${ARCHIVE_NAME} ($ARCHIVE_SIZE)"
+          echo "archive_name=${ARCHIVE_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload bugs to S3
+        if: steps.combine-bugs.outputs.bugs_found == 'true'
+        run: |
+          ARCHIVE_NAME="${{ steps.create-archive.outputs.archive_name }}"
+          S3_KEY="solvers/${{ inputs.solver }}/bugs/${ARCHIVE_NAME}"
+
+          if [ ! -f "$ARCHIVE_NAME" ]; then
+            echo "Error: Archive file not found: $ARCHIVE_NAME"
+            exit 1
+          fi
+
+          aws s3 cp \
+            ${ARCHIVE_NAME} \
+            s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}
+
+          echo "Uploaded $ARCHIVE_NAME to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Total bugs: ${{ steps.combine-bugs.outputs.bug_count }}"
+
+      - name: No bugs found
+        if: steps.combine-bugs.outputs.bugs_found != 'true'
+        run: echo "No bugs found in this run"
+
+  update-fuzz-count:
+    needs: [check-latest-build, commit-fuzzer, collect-bugs]
+    if: always() && needs.commit-fuzzer.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Increment fuzz count and manage schedule
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          COMMIT_HASH="${{ needs.check-latest-build.outputs.commit_to_fuzz }}"
+          python scripts/scheduling/fuzzer.py ${{ inputs.solver }} increment $COMMIT_HASH

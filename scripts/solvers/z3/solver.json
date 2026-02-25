@@ -1,0 +1,50 @@
+{
+  "name": "z3",
+  "display_name": "Z3",
+  "repo_url": "https://github.com/Z3Prover/z3",
+  "binary_path": "build/z3",
+  "solver_flags": "smt.threads=1 memory_max_size=2048 model_validate=true",
+  "test_dir": "test/regress/cli",
+  "default_oracle": "cvc5",
+  "default_fuzzer": "typefuzz",
+  "has_commit_fuzzer": true,
+  "has_coverage_mapping": true,
+  "clang_config": {
+    "cpp_standard": "c++20",
+    "namespace_prefix": "z3::",
+    "defines": [
+      "-DZ3DEBUG",
+      "-D_MP_INTERNAL",
+      "-D_USE_MATH_DEFINES"
+    ],
+    "includes": [
+      "-I./include",
+      "-I./build/include",
+      "-I./src",
+      "-I./build/src"
+    ],
+    "extra_flags": [
+      "-Wno-error"
+    ]
+  },
+  "artifacts": {
+    "binary_subpath": "z3",
+    "header_dirs": ["include", "src"],
+    "deps_dirs": []
+  },
+  "coverage": {
+    "test_type": "filesystem",
+    "test_subdir": "regressions",
+    "test_glob": "*.smt*",
+    "skip_tests": ["regressions/smt2/5731.smt2"],
+    "target_jobs": 4
+  },
+  "ci": {
+    "max_fuzzer_jobs": 9,
+    "test_repo_url": "https://github.com/z3prover/z3test.git",
+    "test_repo_dir": "z3test",
+    "oracle_fallback_pip": "z3-solver",
+    "github_release_repo": "Z3Prover/z3",
+    "github_release_binary": "z3"
+  }
+}

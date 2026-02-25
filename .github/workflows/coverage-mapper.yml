@@ -1,0 +1,292 @@
+name: Coverage Mapper
+
+on:
+  workflow_call:
+    inputs:
+      solver:
+        description: 'Solver name (must have solver.json config)'
+        required: true
+        type: string
+      commit_hash:
+        description: 'Commit hash to build coverage for (defaults to HEAD)'
+        required: false
+        type: string
+        default: ''
+      test_count:
+        description: 'Pre-counted test count (optional)'
+        required: false
+        type: number
+        default: 0
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+jobs:
+  discover-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+      total_tests: ${{ steps.generate-matrix.outputs.total_tests }}
+      total_jobs: ${{ steps.generate-matrix.outputs.total_jobs }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          CONFIG="scripts/solvers/${{ inputs.solver }}/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_type=$(jq -r '.coverage.test_type // "ctest"' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "configure_command=$(jq -r '.ci.configure_command // ""' $CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Clone solver repository
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          REPO_URL="${{ steps.config.outputs.repo_url }}"
+          if [ -d "$SOLVER" ]; then
+            cd "$SOLVER" && git fetch origin
+          else
+            git clone "$REPO_URL" "$SOLVER"
+          fi
+
+      - name: Checkout specific commit
+        if: inputs.commit_hash != ''
+        run: |
+          cd ${{ inputs.solver }}
+          git checkout ${{ inputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Clone test repository
+        if: steps.config.outputs.test_repo_url != ''
+        run: |
+          TEST_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "Test directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.test_repo_url }}" "$TEST_DIR"
+          fi
+
+      - name: Configure build system
+        if: steps.config.outputs.configure_command != ''
+        run: |
+          cd ${{ inputs.solver }}
+          ${{ steps.config.outputs.configure_command }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install psutil
+
+      - name: Generate dynamic matrix
+        id: generate-matrix
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          TEST_TYPE="${{ steps.config.outputs.test_type }}"
+          TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
+
+          ARGS="--solver $SOLVER"
+          if [ "$TEST_TYPE" = "ctest" ]; then
+            ARGS="$ARGS --build-dir $SOLVER/build"
+          fi
+          if [ -n "$TEST_REPO_DIR" ]; then
+            ARGS="$ARGS --test-dir $TEST_REPO_DIR"
+          fi
+
+          python3 scripts/coverage/generate_matrix.py $ARGS --output matrix.json
+
+          MATRIX=$(jq -c '.matrix' matrix.json)
+          TOTAL_TESTS=$(jq -r '.total_tests' matrix.json)
+          TOTAL_JOBS=$(jq -r '.total_jobs' matrix.json)
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "total_jobs=$TOTAL_JOBS" >> $GITHUB_OUTPUT
+
+
+  coverage-analysis:
+    needs: discover-tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover-tests.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          CONFIG="scripts/solvers/${{ inputs.solver }}/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Clone solver repository
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          REPO_URL="${{ steps.config.outputs.repo_url }}"
+          if [ -d "$SOLVER" ]; then
+            cd "$SOLVER" && git fetch origin
+          else
+            git clone "$REPO_URL" "$SOLVER"
+          fi
+
+      - name: Checkout specific commit
+        if: inputs.commit_hash != ''
+        run: |
+          cd ${{ inputs.solver }}
+          git checkout ${{ inputs.commit_hash }}
+          echo "Checked out commit: $(git rev-parse HEAD)"
+
+      - name: Clone test repository
+        if: steps.config.outputs.test_repo_url != ''
+        run: |
+          TEST_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "Test directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.test_repo_url }}" "$TEST_DIR"
+          fi
+
+      - name: Build solver with coverage
+        run: ./scripts/solvers/${{ inputs.solver }}/build.sh --coverage
+
+      - name: Run coverage analysis (tests ${{ matrix.start_index }}-${{ matrix.end_index }})
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
+
+          ARGS="--solver $SOLVER"
+          if [ -n "$TEST_REPO_DIR" ]; then
+            ARGS="$ARGS --test-dir ../../$TEST_REPO_DIR"
+          fi
+
+          ${{ github.workspace }}/scripts/coverage/run_coverage_builder.sh $ARGS ${{ matrix.start_index }} ${{ matrix.end_index }}
+
+      - name: Upload coverage mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-mapping-${{ matrix.job_name }}
+          path: ${{ inputs.solver }}/build/coverage_mapping_${{ matrix.start_index }}_${{ matrix.end_index }}.json
+          retention-days: 1
+
+  join-mappings:
+    runs-on: ubuntu-latest
+    needs: [discover-tests, coverage-analysis]
+    outputs:
+      commit_hash: ${{ steps.get-commit.outputs.commit_hash }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          CONFIG="scripts/solvers/${{ inputs.solver }}/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Get solver commit hash
+        id: get-commit
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          if [ -n "${{ inputs.commit_hash }}" ]; then
+            COMMIT_HASH="${{ inputs.commit_hash }}"
+          else
+            REPO_URL="${{ steps.config.outputs.repo_url }}"
+            if [ ! -d "$SOLVER" ]; then
+              git clone "$REPO_URL" "$SOLVER"
+            fi
+            cd "$SOLVER"
+            git fetch origin
+            COMMIT_HASH=$(git rev-parse HEAD)
+            cd ..
+          fi
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "Solver commit hash: $COMMIT_HASH"
+
+      - name: Download all coverage mappings
+        uses: actions/download-artifact@v4
+        with:
+          path: coverage-mappings
+
+      - name: Join coverage mappings
+        run: python3 scripts/coverage/join_coverage_mappings.py
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload final coverage mapping to S3
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          COMMIT_HASH="${{ steps.get-commit.outputs.commit_hash }}"
+          S3_KEY="solvers/${SOLVER}/coverage-mappings/coverage_mapping-${COMMIT_HASH}.json.gz"
+
+          if [ ! -f "coverage_mapping.json.gz" ]; then
+            echo "Error: coverage_mapping.json.gz not found"
+            exit 1
+          fi
+
+          aws s3api put-object \
+            --bucket ${{ secrets.AWS_S3_BUCKET }} \
+            --key "$S3_KEY" \
+            --body coverage_mapping.json.gz \
+            --tagging "Type=CoverageMapping"
+
+          echo "Uploaded coverage mapping to S3"
+          echo "S3 path: s3://${{ secrets.AWS_S3_BUCKET }}/${S3_KEY}"
+          echo "Commit hash: ${COMMIT_HASH}"
+
+  update-state:
+    runs-on: ubuntu-latest
+    needs: [discover-tests, join-mappings]
+    if: success()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install boto3
+        run: pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update coverage state
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          python3 scripts/coverage/coverage_state.py ${{ inputs.solver }} update \
+            --test-count ${{ needs.discover-tests.outputs.total_tests }} \
+            --commit-hash ${{ needs.join-mappings.outputs.commit_hash }} \
+            --updated-by "${{ github.workflow }}"
+
+          echo "Updated coverage state: ${{ needs.discover-tests.outputs.total_tests }} tests"

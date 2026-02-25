@@ -1,0 +1,148 @@
+name: Coverage Daily Check
+
+on:
+  workflow_call:
+    inputs:
+      solver:
+        description: 'Solver name (must have solver.json config)'
+        required: true
+        type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+jobs:
+  check-rebuild-needed:
+    runs-on: ubuntu-latest
+    outputs:
+      should_rebuild: ${{ steps.check-state.outputs.should_rebuild }}
+      reason: ${{ steps.check-state.outputs.reason }}
+      test_count: ${{ steps.count-tests.outputs.test_count }}
+      commit_hash: ${{ steps.count-tests.outputs.commit_hash }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read solver config
+        id: config
+        run: |
+          CONFIG="scripts/solvers/${{ inputs.solver }}/solver.json"
+          echo "repo_url=$(jq -r '.repo_url' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_type=$(jq -r '.coverage.test_type // "ctest"' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
+          echo "configure_command=$(jq -r '.ci.configure_command // ""' $CONFIG)" >> $GITHUB_OUTPUT
+
+      - name: Clone solver repository
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          REPO_URL="${{ steps.config.outputs.repo_url }}"
+          if [ -d "$SOLVER" ]; then
+            cd "$SOLVER" && git fetch origin
+          else
+            git clone "$REPO_URL" "$SOLVER"
+          fi
+
+      - name: Clone test repository
+        if: steps.config.outputs.test_repo_url != ''
+        run: |
+          TEST_DIR="${{ steps.config.outputs.test_repo_dir }}"
+          if [ -d "$TEST_DIR" ]; then
+            echo "Test directory already exists, skipping clone"
+          else
+            git clone "${{ steps.config.outputs.test_repo_url }}" "$TEST_DIR"
+          fi
+
+      - name: Configure build system
+        if: steps.config.outputs.configure_command != ''
+        run: |
+          cd ${{ inputs.solver }}
+          ${{ steps.config.outputs.configure_command }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install boto3 psutil
+
+      - name: Count tests
+        id: count-tests
+        run: |
+          SOLVER="${{ inputs.solver }}"
+          TEST_TYPE="${{ steps.config.outputs.test_type }}"
+          TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
+
+          ARGS="--solver $SOLVER"
+          if [ "$TEST_TYPE" = "ctest" ]; then
+            ARGS="$ARGS --build-dir $SOLVER/build"
+          fi
+          if [ -n "$TEST_REPO_DIR" ]; then
+            ARGS="$ARGS --test-dir $TEST_REPO_DIR --solver-dir $SOLVER"
+          fi
+
+          python3 scripts/coverage/count_tests.py $ARGS --output test-count.json
+
+          TEST_COUNT=$(jq -r '.test_count' test-count.json)
+          COMMIT_HASH=$(jq -r '.commit_hash' test-count.json)
+
+          echo "test_count=$TEST_COUNT" >> $GITHUB_OUTPUT
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+          echo "Found $TEST_COUNT tests at commit ${COMMIT_HASH:0:8}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Check if rebuild needed
+        id: check-state
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          python3 scripts/coverage/coverage_state.py ${{ inputs.solver }} check \
+            --test-count ${{ steps.count-tests.outputs.test_count }} \
+            --output decision.json
+
+          SHOULD_REBUILD=$(jq -r '.should_rebuild' decision.json)
+          REASON=$(jq -r '.reason' decision.json)
+
+          echo "should_rebuild=$SHOULD_REBUILD" >> $GITHUB_OUTPUT
+          echo "reason=$REASON" >> $GITHUB_OUTPUT
+
+          if [ "$SHOULD_REBUILD" = "true" ]; then
+            echo "Decision: REBUILD - $REASON"
+          else
+            echo "Decision: SKIP - $REASON"
+          fi
+
+  trigger-coverage-build:
+    needs: check-rebuild-needed
+    if: needs.check-rebuild-needed.outputs.should_rebuild == 'true'
+    uses: ./.github/workflows/coverage-mapper.yml
+    with:
+      solver: ${{ inputs.solver }}
+      commit_hash: ${{ needs.check-rebuild-needed.outputs.commit_hash }}
+      test_count: ${{ fromJSON(needs.check-rebuild-needed.outputs.test_count) }}
+    secrets: inherit
+
+  skip-build:
+    needs: check-rebuild-needed
+    if: needs.check-rebuild-needed.outputs.should_rebuild == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip coverage build
+        run: echo "Skipping coverage build - ${{ needs.check-rebuild-needed.outputs.reason }}"
+

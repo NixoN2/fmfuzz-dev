@@ -25,7 +25,7 @@ jobs:
       - name: Check for upstream changes
         id: check-upstream
         run: |
-          ./scripts/check-upstream.sh opensmt https://github.com/usi-verification-and-security/OpenSMT.git
+          ./scripts/shared/check-upstream.sh opensmt https://github.com/usi-verification-and-security/OpenSMT.git
           echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
           echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
       
@@ -38,7 +38,7 @@ jobs:
       
       - name: Build OpenSMT
         if: steps.check-upstream.outputs.build_needed == 'true'
-        run: ./scripts/opensmt/build.sh
+        run: ./scripts/solvers/opensmt/build.sh
       
       - name: Skip build (up to date)
         if: steps.check-upstream.outputs.build_needed == 'false'

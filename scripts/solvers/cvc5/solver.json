@@ -1,0 +1,54 @@
+{
+  "name": "cvc5",
+  "display_name": "CVC5",
+  "repo_url": "https://github.com/cvc5/cvc5",
+  "binary_path": "build/bin/cvc5",
+  "solver_flags": "--check-models --check-proofs --strings-exp",
+  "test_dir": "test/regress/cli",
+  "default_oracle": "z3",
+  "default_fuzzer": "typefuzz",
+  "has_commit_fuzzer": true,
+  "has_coverage_mapping": true,
+  "clang_config": {
+    "cpp_standard": "c++17",
+    "namespace_prefix": "cvc5::",
+    "defines": [
+      "-DCVC5_ASSERTIONS",
+      "-DCVC5_DEBUG",
+      "-DCVC5_STATISTICS_ON",
+      "-DCVC5_TRACING",
+      "-DCVC5_USE_POLY",
+      "-D__BUILDING_CVC5LIB",
+      "-Dcvc5_obj_EXPORTS"
+    ],
+    "includes": [
+      "-I./include",
+      "-I./build/include",
+      "-I./src/include",
+      "-I./src/.",
+      "-I./build/src",
+      "-isystem", "./build/deps/include"
+    ],
+    "extra_flags": [
+      "-Wnon-virtual-dtor",
+      "-Wno-error=deprecated-declarations",
+      "-fvisibility=default"
+    ]
+  },
+  "artifacts": {
+    "binary_subpath": "bin/cvc5",
+    "header_dirs": ["include", "src"],
+    "deps_dirs": ["deps/include", "deps/src"]
+  },
+  "coverage": {
+    "test_type": "ctest",
+    "target_jobs": 6
+  },
+  "ci": {
+    "max_fuzzer_jobs": 9,
+    "configure_command": "./configure.sh production --auto-download",
+    "oracle_fallback_script": "scripts/shared/download_solver_release.py",
+    "github_release_repo": "cvc5/cvc5",
+    "github_release_binary": "cvc5"
+  }
+}

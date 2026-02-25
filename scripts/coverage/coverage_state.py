@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scheduling"))
+from config import discover_solvers
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -213,7 +216,6 @@ Environment variables:
 
     parser.add_argument(
         'solver',
-        choices=['cvc5', 'z3'],
         help='Solver name'
     )
 

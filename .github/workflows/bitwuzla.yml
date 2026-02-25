@@ -25,7 +25,7 @@ jobs:
       - name: Check for upstream changes
         id: check-upstream
         run: |
-          ./scripts/check-upstream.sh bitwuzla https://github.com/bitwuzla/bitwuzla.git
+          ./scripts/shared/check-upstream.sh bitwuzla https://github.com/bitwuzla/bitwuzla.git
           echo "build_needed=$(cat .build_status | grep build_needed | cut -d'=' -f2)" >> $GITHUB_OUTPUT
           echo "sha=$(cat .build_status | grep sha | cut -d'=' -f2)" >> $GITHUB_OUTPUT
       
@@ -38,7 +38,7 @@ jobs:
       
       - name: Build Bitwuzla
         if: steps.check-upstream.outputs.build_needed == 'true'
-        run: ./scripts/bitwuzla/build.sh
+        run: ./scripts/solvers/bitwuzla/build.sh
       
       - name: Skip build (up to date)
         if: steps.check-upstream.outputs.build_needed == 'false'

@@ -138,7 +138,8 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Fuzzer job - select commit from fuzzing schedule')
-    parser.add_argument('solver', choices=['z3', 'cvc5'], help='Solver name')
+    from config import discover_solvers
+    parser.add_argument('solver', choices=discover_solvers(), help='Solver name')
     subparsers = parser.add_subparsers(dest='command', help='Command to execute', required=True)
     
     # Select commit command
