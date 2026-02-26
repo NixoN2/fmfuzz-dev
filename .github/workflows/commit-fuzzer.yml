@@ -362,7 +362,7 @@ jobs:
             if [ "$TOTAL_JOBS" = "0" ] && [ -n "$COMMIT_HASH" ]; then
               echo "No tests found for $COMMIT_HASH — removing from fuzzing schedule"
               python3 ${{ github.workspace }}/scripts/scheduling/s3_state.py \
-                --solver ${{ inputs.solver }} fuzzing remove "$COMMIT_HASH" || true
+                --solver ${{ inputs.solver }} fuzzing-schedule remove "$COMMIT_HASH" || true
             fi
           fi
 
