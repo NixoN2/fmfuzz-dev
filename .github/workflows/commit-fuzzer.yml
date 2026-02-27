@@ -337,6 +337,7 @@ jobs:
         env:
           SKIP_COVERAGE_ENFORCEMENT: "true"
           COMMIT_HASH: ${{ steps.get-commit.outputs.commit_hash }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |
           ${{ github.workspace }}/scripts/commit_fuzzer/run_prepare_commit_fuzzer.sh \
             --solver ${{ inputs.solver }} \
