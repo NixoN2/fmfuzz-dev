@@ -98,7 +98,7 @@ jobs:
           TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
 
           ARGS="--solver $SOLVER"
-          if [ "$TEST_TYPE" = "ctest" ]; then
+          if [ "$TEST_TYPE" = "ctest" ] || [ "$TEST_TYPE" = "manifest" ]; then
             ARGS="$ARGS --build-dir $SOLVER/build"
           fi
           if [ -n "$TEST_REPO_DIR" ]; then
