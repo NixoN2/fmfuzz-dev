@@ -202,6 +202,19 @@ class CoverageMapper:
             sys.stdout.flush()
             return []
 
+    def _resolve_manifest_base_dir(self) -> Path:
+        """Resolve the base directory for manifest test file paths.
+
+        For solvers with an external test repo (e.g. z3), test_dir points to it.
+        For in-repo tests (e.g. bitwuzla, cvc5), use build_dir's resolved parent
+        (the solver source root) combined with the configured test_subdir.
+        """
+        if self.test_dir is not None:
+            return self.test_dir
+        solver_root = self.build_dir.resolve().parent
+        test_subdir = self.cov_config.get("test_subdir", "")
+        return solver_root / test_subdir if test_subdir else solver_root
+
     def _get_manifest_tests(self) -> List[Tuple]:
         """Call the solver's manifest script to discover tests with per-entry flags."""
         manifest_script = self.cov_config.get("manifest_script")
@@ -216,16 +229,7 @@ class CoverageMapper:
             sys.stdout.flush()
             return []
 
-        # Resolve the base directory the manifest script should receive.
-        # For solvers with an external test repo (e.g. z3), test_dir points to it.
-        # For in-repo tests (e.g. bitwuzla), use build_dir's resolved parent (solver source)
-        # combined with the configured test_subdir.
-        if self.test_dir is not None:
-            base_dir = self.test_dir
-        else:
-            solver_root = self.build_dir.resolve().parent
-            test_subdir = self.cov_config.get("test_subdir", "")
-            base_dir = solver_root / test_subdir if test_subdir else solver_root
+        base_dir = self._resolve_manifest_base_dir()
 
         try:
             result = subprocess.run(
@@ -374,12 +378,7 @@ class CoverageMapper:
             self.reset_coverage_counters()
 
             # Resolve test file path — same logic as _get_manifest_tests base_dir
-            if self.test_dir is not None:
-                base_dir = self.test_dir
-            else:
-                solver_root = self.build_dir.resolve().parent
-                test_subdir = self.cov_config.get("test_subdir", "")
-                base_dir = solver_root / test_subdir if test_subdir else solver_root
+            base_dir = self._resolve_manifest_base_dir()
 
             test_file = base_dir / test_name
             if not test_file.exists():
@@ -499,7 +498,7 @@ class CoverageMapper:
 
     # ── Test processing loop ────────────────────────────────────────────
 
-    def process_tests(self, tests: List[Tuple[int, str]], max_runtime_seconds: int = None) -> str:
+    def process_tests(self, tests: List[Tuple], max_runtime_seconds: int = None) -> str:
         """Process tests sequentially with time guard and streaming to disk"""
         print(f"Processing {len(tests)} tests")
         print(f"Memory limit: {self.max_memory_mb}MB")

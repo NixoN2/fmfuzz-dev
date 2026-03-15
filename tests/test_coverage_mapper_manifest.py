@@ -1,7 +1,6 @@
 """Unit tests for the manifest test_type in CoverageMapper."""
 import json
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
