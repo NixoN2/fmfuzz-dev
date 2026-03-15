@@ -29,7 +29,10 @@
   },
   "artifacts": {
     "binary_subpath": "z3",
-    "header_dirs": ["include", "src"],
+    "header_dirs": [
+      "include",
+      "src"
+    ],
     "deps_dirs": []
   },
   "coverage": {
@@ -37,11 +40,13 @@
     "manifest_script": "scripts/solvers/z3/gen_test_manifest.py",
     "test_subdir": "regressions",
     "test_glob": "*.smt*",
-    "skip_tests": ["regressions/smt2/5731.smt2"],
+    "skip_tests": [
+      "regressions/smt2/5731.smt2"
+    ],
     "target_jobs": 4
   },
   "ci": {
-    "max_fuzzer_jobs": 9,
+    "max_fuzzer_jobs": 6,
     "test_repo_url": "https://github.com/z3prover/z3test.git",
     "test_repo_dir": "z3test",
     "oracle_fallback_pip": "z3-solver",

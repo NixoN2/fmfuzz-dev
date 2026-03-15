@@ -27,7 +27,8 @@
       "-I./src/include",
       "-I./src/.",
       "-I./build/src",
-      "-isystem", "./build/deps/include"
+      "-isystem",
+      "./build/deps/include"
     ],
     "extra_flags": [
       "-Wnon-virtual-dtor",
@@ -37,8 +38,14 @@
   },
   "artifacts": {
     "binary_subpath": "bin/cvc5",
-    "header_dirs": ["include", "src"],
-    "deps_dirs": ["deps/include", "deps/src"]
+    "header_dirs": [
+      "include",
+      "src"
+    ],
+    "deps_dirs": [
+      "deps/include",
+      "deps/src"
+    ]
   },
   "coverage": {
     "test_type": "manifest",
@@ -47,7 +54,7 @@
     "target_jobs": 6
   },
   "ci": {
-    "max_fuzzer_jobs": 9,
+    "max_fuzzer_jobs": 6,
     "configure_command": "./configure.sh production --auto-download",
     "oracle_fallback_script": "scripts/shared/download_solver_release.py",
     "github_release_repo": "cvc5/cvc5",
