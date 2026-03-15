@@ -17,7 +17,7 @@ from coverage_mapper import CoverageMapper
 
 def filter_tests(tests: list, skip_tests: set) -> list:
     """Filter tests using skip list from solver config, re-indexing after removal."""
-    filtered = [(i + 1, name) for i, (_, name) in enumerate(t for t in tests if t[1] not in skip_tests)]
+    filtered = [(i + 1, t[1]) for i, t in enumerate(t for t in tests if t[1] not in skip_tests)]
     return filtered
 
 
