@@ -124,7 +124,7 @@ def verify_commit_is_newer(repo_url: str, newer_commit: str, older_commit: str, 
             response.raise_for_status()
             data = response.json()
             
-            commit_date_str = data.get('commit', {}).get('author', {}).get('date')
+            commit_date_str = data.get('commit', {}).get('committer', {}).get('date')
             if commit_date_str:
                 commit_date = datetime.fromisoformat(commit_date_str.replace('Z', '+00:00'))
                 print(f" date={commit_date.isoformat()}")
