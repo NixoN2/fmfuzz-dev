@@ -18,7 +18,8 @@ def run_script(test_dir: Path) -> list:
 
 def test_discovers_all_entries():
     entries = run_script(FIXTURE)
-    assert len(entries) == 6  # 6 test entries including flag variants
+    # 6 original + 1 incremental (backtrack/push1.smt2); .btor.smt2 filtered out
+    assert len(entries) == 7
 
 
 def test_no_flags_entry():
@@ -37,11 +38,30 @@ def test_flag_variants_same_file():
     assert ("--bv-solver=preprop",) in flags_set
 
 
+def test_btor_files_excluded():
+    entries = run_script(FIXTURE)
+    files = [e["file"] for e in entries]
+    assert not any(f.endswith(".btor.smt2") for f in files)
+
+
+def test_incremental_file_gets_dash_i():
+    entries = run_script(FIXTURE)
+    push = [e for e in entries if e["file"] == "backtrack/push1.smt2"]
+    assert len(push) == 1
+    assert "-i" in push[0]["flags"]
+
+
+def test_non_incremental_file_no_dash_i():
+    entries = run_script(FIXTURE)
+    add = [e for e in entries if e["file"] == "solver/bv/add.smt2"]
+    assert len(add) == 1
+    assert "-i" not in add[0]["flags"]
+
+
 def test_paths_relative_to_test_regress():
     entries = run_script(FIXTURE)
     for e in entries:
         assert not Path(e["file"]).is_absolute()
-        # Paths should NOT start with 'test/regress/'
         assert not e["file"].startswith("test/"), f"Got unexpected prefix: {e['file']}"
 
 

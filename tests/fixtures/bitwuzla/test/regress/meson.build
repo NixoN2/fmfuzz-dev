@@ -5,4 +5,6 @@ tests_smt2 = [
   ['solver/fp/fma.smt2'],
   ['solver/fp/fma.smt2', ['-rwl=0']],
   ['solver/fp/fma.smt2', ['-rwl=1']],
+  ['solver/bv/old_format.btor.smt2'],
+  ['backtrack/push1.smt2'],
 ]

@@ -1,0 +1,5 @@
+(set-logic QF_BV)
+(push 1)
+(assert (= (_ bv1 8) (_ bv1 8)))
+(check-sat)
+(pop 1)
