@@ -3,7 +3,7 @@
   "display_name": "Bitwuzla",
   "repo_url": "https://github.com/bitwuzla/bitwuzla",
   "binary_path": "build/src/main/bitwuzla",
-  "solver_flags": "",
+  "solver_flags": "--produce-models",
   "test_dir": "test/regress",
   "default_oracle": "z3",
   "default_fuzzer": "typefuzz",
