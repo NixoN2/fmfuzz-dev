@@ -73,11 +73,9 @@ class ResourceMonitor:
                     avg_cpu = sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0.0
 
                     status = 'normal'
-                    if (avg_cpu >= self.CONFIG['cpu_critical'] or
-                            memory_available_gb < self.CONFIG['memory_critical_available_gb']):
+                    if memory_available_gb < self.CONFIG['memory_critical_available_gb']:
                         status = 'critical'
-                    elif (avg_cpu >= self.CONFIG['cpu_warning'] or
-                          memory_available_gb < self.CONFIG['memory_warning_available_gb']):
+                    elif memory_available_gb < self.CONFIG['memory_warning_available_gb']:
                         status = 'warning'
 
                     with self._state_lock:
