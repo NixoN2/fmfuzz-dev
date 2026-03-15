@@ -1,0 +1,37 @@
+{
+  "name": "bitwuzla",
+  "display_name": "Bitwuzla",
+  "repo_url": "https://github.com/bitwuzla/bitwuzla",
+  "binary_path": "build/src/main/bitwuzla",
+  "solver_flags": "",
+  "test_dir": "test/regress",
+  "default_oracle": "z3",
+  "default_fuzzer": "typefuzz",
+  "has_commit_fuzzer": true,
+  "has_coverage_mapping": true,
+  "clang_config": {
+    "cpp_standard": "c++17",
+    "namespace_prefix": "bzla::",
+    "defines": ["-DBZLA_USE_CADICAL"],
+    "includes": ["-I./include", "-I./src", "-I./build/src"],
+    "extra_flags": ["-Wno-error"]
+  },
+  "artifacts": {
+    "binary_subpath": "src/main/bitwuzla",
+    "header_dirs": ["include", "src"],
+    "deps_dirs": []
+  },
+  "coverage": {
+    "test_type": "manifest",
+    "manifest_script": "scripts/solvers/bitwuzla/gen_test_manifest.py",
+    "test_subdir": "test/regress",
+    "source_include": ["src/"],
+    "source_exclude": ["/subprojects/"],
+    "target_jobs": 4
+  },
+  "ci": {
+    "max_fuzzer_jobs": 9,
+    "github_release_repo": "bitwuzla/bitwuzla",
+    "github_release_binary": "bitwuzla"
+  }
+}
