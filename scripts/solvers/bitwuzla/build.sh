@@ -17,7 +17,7 @@ done
 echo "Installing build dependencies..."
 sudo apt-get update -qq
 sudo apt-get install -y \
-  build-essential git libgmp-dev meson ninja-build python3 python3-pip
+  build-essential git libgmp-dev libmpfr-dev meson ninja-build python3 python3-pip
 
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "Installing coverage tools..."
