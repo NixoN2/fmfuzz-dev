@@ -11,3 +11,8 @@ set(REGRESS_1_TESTS
 set(REGRESS_2_TESTS
   strings/concat.smt2
 )
+
+set(REGRESS_3_TESTS
+  tptp/ARI086=1.smt2
+  tptp/KRS018+1.smt2
+)

@@ -24,7 +24,10 @@ def test_discovers_all_tests():
     assert "bv/foo.smt2" in files
     assert "bv/bar.smt2" in files
     assert "strings/concat.smt2" in files
-    assert len(files) == 5
+    # TPTP-style filenames with '=' and '+' must be captured correctly
+    assert "tptp/ARI086=1.smt2" in files
+    assert "tptp/KRS018+1.smt2" in files
+    assert len(files) == 7
 
 
 def test_paths_relative_to_test_subdir():

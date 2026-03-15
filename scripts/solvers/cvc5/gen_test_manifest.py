@@ -17,8 +17,9 @@ from pathlib import Path
 def parse_cmake_test_lists(cmake_file: Path) -> list:
     """Extract .smt2 file paths from set(...) blocks in a CMakeLists.txt."""
     text = cmake_file.read_text()
-    # Match lines that look like smt2 file paths (word chars, slashes, dots)
-    return sorted(set(re.findall(r'[\w./][\w./-]*\.smt2?', text)))
+    # Match indented lines whose sole token ends with .smt2/.smt.
+    # \S+ captures the full filename including TPTP-style chars like '=', '+', '^'.
+    return sorted(set(re.findall(r'^\s+(\S+\.smt2?)\s*$', text, re.MULTILINE)))
 
 
 def main():
