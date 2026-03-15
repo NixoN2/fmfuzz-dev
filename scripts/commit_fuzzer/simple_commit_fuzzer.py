@@ -202,9 +202,6 @@ class SimpleCommitFuzzer:
             return (False, [], 0.0, 'continue')
 
         solver_cli = self._get_solver_cli_for_test(test_name)
-        print(f"[WORKER {worker_id}] Running {self.fuzzer_name} on: {test_name}" +
-              (f" (timeout: {per_test_timeout}s)" if per_test_timeout else "") +
-              (f" (flags: {' '.join(self.per_test_flags[test_name])})" if test_name in self.per_test_flags and self.per_test_flags[test_name] else ""))
 
         run = self.FuzzerClass(
             worker_id=worker_id,
@@ -241,7 +238,6 @@ class SimpleCommitFuzzer:
             return 'remove'
 
         if exit_action == 'requeue':
-            print(f"[WORKER {worker_id}] No bugs on {test_name} (runtime: {runtime:.1f}s) — requeuing")
             return 'requeue'
 
         return 'continue'
