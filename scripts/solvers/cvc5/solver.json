@@ -54,7 +54,7 @@
     "target_jobs": 6
   },
   "ci": {
-    "max_fuzzer_jobs": 6,
+    "max_fuzzer_jobs": 9,
     "configure_command": "./configure.sh production --auto-download",
     "oracle_fallback_script": "scripts/shared/download_solver_release.py",
     "github_release_repo": "cvc5/cvc5",

@@ -26,6 +26,14 @@ on:
       AWS_S3_BUCKET:
         required: true
 
+env:
+  # CI concurrency budget. Effective fuzzer jobs per solver =
+  # min(max_fuzzer_jobs, floor((CI_TOTAL_SLOTS - CI_RESERVED_SLOTS) / CI_NUM_SOLVERS)).
+  # When adding a solver: increment CI_NUM_SOLVERS here — nothing else needs changing.
+  CI_TOTAL_SLOTS: 20      # GitHub account concurrent job limit
+  CI_RESERVED_SLOTS: 4    # kept for build / coverage / manager workflows
+  CI_NUM_SOLVERS: 3       # active solvers sharing the fuzzing budget
+
 jobs:
   check-latest-build:
     runs-on: ubuntu-latest
@@ -146,7 +154,9 @@ jobs:
           echo "binary_path=$(jq -r '.binary_path' $CONFIG)" >> $GITHUB_OUTPUT
           echo "test_repo_url=$(jq -r '.ci.test_repo_url // ""' $CONFIG)" >> $GITHUB_OUTPUT
           echo "test_repo_dir=$(jq -r '.ci.test_repo_dir // ""' $CONFIG)" >> $GITHUB_OUTPUT
-          echo "max_fuzzer_jobs=$(jq -r '.ci.max_fuzzer_jobs // 9' $CONFIG)" >> $GITHUB_OUTPUT
+          desired=$(jq -r '.ci.max_fuzzer_jobs // 9' $CONFIG)
+          budget=$(( ($CI_TOTAL_SLOTS - $CI_RESERVED_SLOTS) / $CI_NUM_SOLVERS ))
+          echo "max_fuzzer_jobs=$(( desired < budget ? desired : budget ))" >> $GITHUB_OUTPUT
 
       - name: Install LLVM/Clang 17
         uses: KyleMayes/install-llvm-action@v2

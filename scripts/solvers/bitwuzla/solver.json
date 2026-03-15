@@ -45,7 +45,7 @@
     "target_jobs": 4
   },
   "ci": {
-    "max_fuzzer_jobs": 6,
+    "max_fuzzer_jobs": 9,
     "github_release_repo": "bitwuzla/bitwuzla",
     "github_release_binary": "bitwuzla"
   }
