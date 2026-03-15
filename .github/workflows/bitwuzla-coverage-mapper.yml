@@ -1,0 +1,39 @@
+name: Bitwuzla Coverage Mapper
+
+on:
+  workflow_call:
+    inputs:
+      commit_hash:
+        required: false
+        type: string
+      test_count:
+        required: false
+        type: number
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_REGION:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      commit_hash:
+        description: 'Optional: commit hash to build coverage mapping for (defaults to HEAD)'
+        required: false
+        type: string
+
+  schedule:
+    - cron: '0 0 1 * *'
+
+jobs:
+  coverage:
+    uses: ./.github/workflows/coverage-mapper.yml
+    with:
+      solver: bitwuzla
+      commit_hash: ${{ inputs.commit_hash || '' }}
+      test_count: ${{ inputs.test_count || 0 }}
+    secrets: inherit

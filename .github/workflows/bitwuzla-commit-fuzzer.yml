@@ -1,0 +1,30 @@
+name: Bitwuzla Commit Fuzzer
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_hash:
+        description: 'Optional: Bitwuzla commit hash to analyze (defaults to HEAD)'
+        required: false
+        type: string
+      coverage_commit_hash:
+        description: 'Optional: Bitwuzla commit hash for coverage mapping (defaults to latest in S3)'
+        required: false
+        type: string
+      stop_buffer_minutes:
+        description: 'Optional: Minutes before timeout to stop fuzzing (default: 5)'
+        required: false
+        type: number
+        default: 5
+  schedule:
+    - cron: '45 0,6,12,18 * * *'
+
+jobs:
+  fuzzer:
+    uses: ./.github/workflows/commit-fuzzer.yml
+    with:
+      solver: bitwuzla
+      commit_hash: ${{ inputs.commit_hash || '' }}
+      coverage_commit_hash: ${{ inputs.coverage_commit_hash || '' }}
+      stop_buffer_minutes: ${{ inputs.stop_buffer_minutes || 5 }}
+    secrets: inherit

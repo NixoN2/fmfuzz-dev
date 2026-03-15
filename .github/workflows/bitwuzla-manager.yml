@@ -1,18 +1,18 @@
-name: Build Bitwuzla
+name: Bitwuzla Manager
 
 on:
   workflow_dispatch:
     inputs:
       commit_hash:
-        description: 'Optional: Bitwuzla commit hash to add to build queue'
+        description: 'Optional: Commit hash to add to build queue'
         required: false
         type: string
   schedule:
-    - cron: '5,35 * * * *'
+    - cron: '*/15 * * * *'
 
 jobs:
-  build:
-    uses: ./.github/workflows/build.yml
+  manager:
+    uses: ./.github/workflows/manager.yml
     with:
       solver: bitwuzla
       commit_hash: ${{ inputs.commit_hash || '' }}
