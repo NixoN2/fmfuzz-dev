@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scheduling"))
 from config import get_solver_config
 
+# Project root — two levels up from scripts/coverage/
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 class CoverageMapper:
     # Paths that are never solver source — always excluded regardless of config
@@ -127,12 +130,14 @@ class CoverageMapper:
 
     # ── Test discovery ──────────────────────────────────────────────────
 
-    def get_tests(self) -> List[Tuple[int, str]]:
+    def get_tests(self) -> List[Tuple]:
         """Get tests using config-driven discovery method"""
         if self.test_type == "filesystem":
             return self._get_filesystem_tests()
         elif self.test_type == "ctest":
             return self._get_ctest_tests()
+        elif self.test_type == "manifest":
+            return self._get_manifest_tests()
         else:
             print(f"Error: unsupported test_type '{self.test_type}' in coverage config")
             sys.stdout.flush()
@@ -197,14 +202,61 @@ class CoverageMapper:
             sys.stdout.flush()
             return []
 
+    def _get_manifest_tests(self) -> List[Tuple]:
+        """Call the solver's manifest script to discover tests with per-entry flags."""
+        manifest_script = self.cov_config.get("manifest_script")
+        if not manifest_script:
+            print("Error: manifest_script not set in coverage config")
+            sys.stdout.flush()
+            return []
+
+        script_path = REPO_ROOT / manifest_script
+        if not script_path.exists():
+            print(f"Error: manifest script not found: {script_path}")
+            sys.stdout.flush()
+            return []
+
+        # Resolve the base directory the manifest script should receive.
+        # For solvers with an external test repo (e.g. z3), test_dir points to it.
+        # For in-repo tests (e.g. bitwuzla), use build_dir's resolved parent (solver source)
+        # combined with the configured test_subdir.
+        if self.test_dir is not None:
+            base_dir = self.test_dir
+        else:
+            solver_root = self.build_dir.resolve().parent
+            test_subdir = self.cov_config.get("test_subdir", "")
+            base_dir = solver_root / test_subdir if test_subdir else solver_root
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script_path), str(base_dir)],
+                capture_output=True, text=True, check=True
+            )
+            entries = json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            print(f"Error running manifest script: {e.stderr}")
+            sys.stdout.flush()
+            return []
+        except json.JSONDecodeError as e:
+            print(f"Error parsing manifest script output: {e}")
+            sys.stdout.flush()
+            return []
+
+        tests = [(i + 1, entry["file"], entry["flags"]) for i, entry in enumerate(entries)]
+        print(f"Found {len(tests)} manifest test entries")
+        sys.stdout.flush()
+        return tests
+
     # ── Single test execution ───────────────────────────────────────────
 
-    def process_single_test(self, test_info: Tuple[int, str]) -> Optional[Dict]:
+    def process_single_test(self, test_info: Tuple) -> Optional[Dict]:
         """Process a single test using config-driven execution method"""
         if self.test_type == "filesystem":
             return self._process_direct_test(test_info)
         elif self.test_type == "ctest":
             return self._process_ctest_test(test_info)
+        elif self.test_type == "manifest":
+            return self._process_manifest_test(test_info)
         else:
             return None
 
@@ -291,6 +343,71 @@ class CoverageMapper:
 
             if result.returncode != 0:
                 print(f"  {test_name} - failed - {execution_time}s")
+                return None
+
+            coverage_data = self.extract_coverage_data(test_name)
+            if coverage_data:
+                print(f"  {test_name} - {len(coverage_data['functions'])} functions - {execution_time}s")
+            else:
+                print(f"  {test_name} - no coverage data - {execution_time}s")
+            sys.stdout.flush()
+            self.cleanup_memory()
+            return coverage_data
+
+        except Exception as e:
+            print(f"  {test_name} - unexpected error: {e} (skipping)")
+            sys.stdout.flush()
+            return None
+
+    def _process_manifest_test(self, test_info: Tuple) -> Optional[Dict]:
+        """Run solver binary with per-manifest-entry flags and extract coverage."""
+        test_id, test_name, entry_flags = test_info
+
+        if test_name in self.skip_tests:
+            print(f"  {test_name} - skipped (in skip list)")
+            sys.stdout.flush()
+            return None
+
+        try:
+            for gcda in self.build_dir.rglob("*.gcda"):
+                gcda.unlink()
+            self.reset_coverage_counters()
+
+            # Resolve test file path — same logic as _get_manifest_tests base_dir
+            if self.test_dir is not None:
+                base_dir = self.test_dir
+            else:
+                solver_root = self.build_dir.resolve().parent
+                test_subdir = self.cov_config.get("test_subdir", "")
+                base_dir = solver_root / test_subdir if test_subdir else solver_root
+
+            test_file = base_dir / test_name
+            if not test_file.exists():
+                print(f"  {test_name} - test file not found: {test_file}")
+                sys.stdout.flush()
+                return None
+
+            # Global solver flags + per-entry flags
+            cmd = ([str(self.solver_binary)] + self.solver_test_flags
+                   + entry_flags + [str(test_file)])
+
+            start_time = time.time()
+            try:
+                result = subprocess.run(
+                    cmd, cwd=self.build_dir,
+                    capture_output=True, text=True, check=False,
+                    timeout=self.test_timeout
+                )
+            except subprocess.TimeoutExpired:
+                print(f"  {test_name} - timeout after {self.test_timeout}s (skipping)")
+                sys.stdout.flush()
+                return None
+
+            execution_time = round(time.time() - start_time, 2)
+
+            if result.returncode != 0:
+                print(f"  {test_name} - failed (exit {result.returncode}) - {execution_time}s")
+                sys.stdout.flush()
                 return None
 
             coverage_data = self.extract_coverage_data(test_name)
@@ -403,7 +520,8 @@ class CoverageMapper:
                     sys.stdout.flush()
                     break
 
-            test_id, test_name = test_info
+            test_id = test_info[0]
+            test_name = test_info[1]
             print(f"Test {i}/{len(tests)} (#{test_id}): {test_name}")
             sys.stdout.flush()
 
