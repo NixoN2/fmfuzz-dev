@@ -6,10 +6,11 @@ import json
 import multiprocessing
 import shutil
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 
@@ -66,6 +67,7 @@ class SimpleCommitFuzzer:
         self.oracle_flags = self.oracle_config.get("solver_flags", "")
         self.solver_cli = f"{self._resolve_binary(self.solver_name, self.solver_binary)} {self.solver_flags}".strip()
         self.oracle_cli = f"{self._resolve_binary(self.oracle_name, self.oracle_binary)} {self.oracle_flags}".strip()
+        self.per_test_flags = self._load_per_test_flags()
 
         try:
             self.cpu_count = psutil.cpu_count()
@@ -106,6 +108,48 @@ class SimpleCommitFuzzer:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _load_per_test_flags(self) -> Dict[str, List[str]]:
+        """Run the solver's manifest script to build a {file → flags} lookup.
+
+        For files with multiple flag variants (e.g. bitwuzla's -rwl=0/1/2),
+        the first non-empty flag set is used. Falls back to {} on any error.
+        """
+        manifest_script = self.solver_config.get("coverage", {}).get("manifest_script")
+        if not manifest_script:
+            return {}
+
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        script_path = repo_root / manifest_script
+        if not script_path.exists():
+            print(f"[WARN] Manifest script not found: {script_path}", file=sys.stderr)
+            return {}
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script_path), str(self.tests_root)],
+                capture_output=True, text=True, check=True, timeout=120,
+            )
+            entries = json.loads(result.stdout)
+        except Exception as e:
+            print(f"[WARN] Failed to load per-test flags from manifest: {e}", file=sys.stderr)
+            return {}
+
+        flags_map: Dict[str, List[str]] = {}
+        for entry in entries:
+            file_path = entry["file"]
+            flags = entry["flags"]
+            # Keep first non-empty flag set; fall back to empty if all are empty.
+            if file_path not in flags_map or (flags and not flags_map[file_path]):
+                flags_map[file_path] = flags
+        return flags_map
+
+    def _get_solver_cli_for_test(self, test_name: str) -> str:
+        """Return solver CLI with per-test flags appended, if any."""
+        per_test_flags = self.per_test_flags.get(test_name, [])
+        if per_test_flags:
+            return f"{self.solver_cli} {' '.join(per_test_flags)}"
+        return self.solver_cli
 
     def _resolve_binary(self, name: str, binary: Path) -> str:
         if binary.exists():
@@ -157,13 +201,15 @@ class SimpleCommitFuzzer:
             print(f"[WORKER {worker_id}] Error: Test file not found: {test_path}", file=sys.stderr)
             return (False, [], 0.0, 'continue')
 
+        solver_cli = self._get_solver_cli_for_test(test_name)
         print(f"[WORKER {worker_id}] Running {self.fuzzer_name} on: {test_name}" +
-              (f" (timeout: {per_test_timeout}s)" if per_test_timeout else ""))
+              (f" (timeout: {per_test_timeout}s)" if per_test_timeout else "") +
+              (f" (flags: {' '.join(self.per_test_flags[test_name])})" if test_name in self.per_test_flags and self.per_test_flags[test_name] else ""))
 
         run = self.FuzzerClass(
             worker_id=worker_id,
             seed_path=str(test_path),
-            solver_cli=self.solver_cli,
+            solver_cli=solver_cli,
             oracle_cli=self.oracle_cli,
             params_override=self.fuzzer_params,
         )
@@ -279,6 +325,9 @@ class SimpleCommitFuzzer:
         print(f"Solver: {self.solver_name} ({self.solver_cli})")
         print(f"Oracle: {self.oracle_name} ({self.oracle_cli})")
         print(f"Tests root: {self.tests_root}")
+        if self.per_test_flags:
+            tests_with_flags = sum(1 for f in self.per_test_flags.values() if f)
+            print(f"Per-test flags: {tests_with_flags} test(s) have extra flags")
         print(f"Timeout: {self.time_remaining}s ({self.time_remaining // 60}m)" if self.time_remaining else "No timeout")
         if self.fuzzer_params:
             print(f"Fuzzer params: {', '.join(f'{k}={v}' for k, v in self.fuzzer_params.items())}")
