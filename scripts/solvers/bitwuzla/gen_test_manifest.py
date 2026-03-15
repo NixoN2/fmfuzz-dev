@@ -21,10 +21,10 @@ def parse_meson_tests(meson_file: Path) -> list:
     """
     text = meson_file.read_text()
 
-    # Find each test entry: ['some/path.smt2', [...flags...]]
-    # Match the outer list brackets to extract file + flags block
+    # Find each test entry: ['some/path.smt2'] or ['some/path.smt2', [...flags...]]
+    # Flags list is optional — entries without flags omit the second element.
     entry_pattern = re.compile(
-        r"\[\s*'([^']+\.smt2?)'\s*,\s*(\[[^\]]*\])\s*\]",
+        r"\[\s*'([^']+\.smt2?)'\s*(?:,\s*(\[[^\]]*\]))?\s*\]",
         re.DOTALL
     )
 
@@ -32,8 +32,7 @@ def parse_meson_tests(meson_file: Path) -> list:
     for match in entry_pattern.finditer(text):
         file_path = match.group(1)
         flags_raw = match.group(2)
-        # Extract quoted strings from the flags list
-        flags = re.findall(r"'([^']+)'", flags_raw)
+        flags = re.findall(r"'([^']+)'", flags_raw) if flags_raw is not None else []
         entries.append({"file": file_path, "flags": flags})
 
     return entries
