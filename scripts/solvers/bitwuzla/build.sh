@@ -21,7 +21,7 @@ sudo apt-get install -y \
 
 if [[ "$ENABLE_COVERAGE" == "true" ]]; then
     echo "Installing coverage tools..."
-    sudo apt-get install -y lcov gcc
+    sudo apt-get install -y lcov gcc libgtest-dev
     pip3 install fastcov psutil
 fi
 
