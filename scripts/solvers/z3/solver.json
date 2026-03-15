@@ -33,7 +33,8 @@
     "deps_dirs": []
   },
   "coverage": {
-    "test_type": "filesystem",
+    "test_type": "manifest",
+    "manifest_script": "scripts/solvers/z3/gen_test_manifest.py",
     "test_subdir": "regressions",
     "test_glob": "*.smt*",
     "skip_tests": ["regressions/smt2/5731.smt2"],

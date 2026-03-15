@@ -41,7 +41,9 @@
     "deps_dirs": ["deps/include", "deps/src"]
   },
   "coverage": {
-    "test_type": "ctest",
+    "test_type": "manifest",
+    "manifest_script": "scripts/solvers/cvc5/gen_test_manifest.py",
+    "test_subdir": "test/regress/cli",
     "target_jobs": 6
   },
   "ci": {
