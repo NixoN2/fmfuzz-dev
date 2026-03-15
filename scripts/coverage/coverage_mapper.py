@@ -3,15 +3,15 @@
 Unified Coverage Mapper
 Processes solver tests and extracts per-function coverage data using fastcov.
 
-Supports two test types (configured in solver.json "coverage" section):
-  - "filesystem": discovers test files by walking a directory, runs solver binary directly
-  - "ctest": discovers tests via ctest --show-only, runs tests via ctest
+Test discovery uses the "manifest" approach: each solver provides a
+gen_test_manifest.py script that emits [{file, flags}] to stdout.
+Coverage mapper calls this script, runs the binary with per-entry flags,
+and captures gcov data.
 """
 
 import sys
 import json
 import subprocess
-import re
 import argparse
 import time
 import random
@@ -59,10 +59,6 @@ class CoverageMapper:
         # Skip tests list from config
         self.skip_tests = set(self.cov_config.get("skip_tests", []))
 
-        # Filesystem test discovery config
-        self.test_subdir = self.cov_config.get("test_subdir", "regressions")
-        self.test_glob = self.cov_config.get("test_glob", "*.smt*")
-
         # Per-test timeout from config
         self.test_timeout = self.cov_config.get("test_timeout", 120)
 
@@ -70,8 +66,6 @@ class CoverageMapper:
         self.source_include = self.cov_config.get("source_include", ["src/"])
         self.source_exclude = self.cov_config.get("source_exclude", self.DEFAULT_SOURCE_EXCLUDE)
 
-        # Pre-compile regex for ctest output parsing
-        self.test_regex = re.compile(r'Test\s+#(\d+):\s*(.+)')
         # Cache for demangled names
         self.demangle_cache = {}
         # Memory monitoring
@@ -132,73 +126,10 @@ class CoverageMapper:
 
     def get_tests(self) -> List[Tuple]:
         """Get tests using config-driven discovery method"""
-        if self.test_type == "filesystem":
-            return self._get_filesystem_tests()
-        elif self.test_type == "ctest":
-            return self._get_ctest_tests()
-        elif self.test_type == "manifest":
+        if self.test_type == "manifest":
             return self._get_manifest_tests()
         else:
             print(f"Error: unsupported test_type '{self.test_type}' in coverage config")
-            sys.stdout.flush()
-            return []
-
-    def _get_filesystem_tests(self) -> List[Tuple[int, str]]:
-        """Get test files by walking a directory (e.g. z3test/regressions/*.smt*)"""
-        try:
-            if not self.test_dir or not self.test_dir.exists():
-                print(f"Error: test directory not found: {self.test_dir}")
-                sys.stdout.flush()
-                return []
-
-            subdir = self.test_dir / self.test_subdir
-            if not subdir.exists():
-                print(f"Error: test subdirectory not found: {subdir}")
-                sys.stdout.flush()
-                return []
-
-            tests = []
-            for test_file in subdir.rglob(self.test_glob):
-                if test_file.name.endswith('.disabled'):
-                    continue
-                rel_path = test_file.relative_to(self.test_dir)
-                tests.append(str(rel_path))
-
-            tests = sorted(tests)
-            indexed_tests = [(i + 1, test) for i, test in enumerate(tests)]
-
-            print(f"Found {len(indexed_tests)} filesystem tests")
-            sys.stdout.flush()
-            return indexed_tests
-
-        except Exception as e:
-            print(f"Error discovering filesystem tests: {e}")
-            sys.stdout.flush()
-            return []
-
-    def _get_ctest_tests(self) -> List[Tuple[int, str]]:
-        """Get tests from ctest --show-only"""
-        try:
-            result = subprocess.run(["ctest", "--show-only"], cwd=self.build_dir,
-                                    capture_output=True, text=True)
-
-            if result.returncode != 0:
-                print(f"Error running ctest --show-only: {result.stderr}")
-                sys.stdout.flush()
-                return []
-
-            tests = []
-            for line in result.stdout.split('\n'):
-                match = self.test_regex.match(line.strip())
-                if match:
-                    tests.append((int(match.group(1)), match.group(2)))
-
-            print(f"Found {len(tests)} ctest tests")
-            sys.stdout.flush()
-            return tests
-
-        except Exception as e:
-            print(f"Error discovering ctest tests: {e}")
             sys.stdout.flush()
             return []
 
@@ -254,114 +185,10 @@ class CoverageMapper:
     # ── Single test execution ───────────────────────────────────────────
 
     def process_single_test(self, test_info: Tuple) -> Optional[Dict]:
-        """Process a single test using config-driven execution method"""
-        if self.test_type == "filesystem":
-            return self._process_direct_test(test_info)
-        elif self.test_type == "ctest":
-            return self._process_ctest_test(test_info)
-        elif self.test_type == "manifest":
+        """Process a single test using manifest execution"""
+        if self.test_type == "manifest":
             return self._process_manifest_test(test_info)
-        else:
-            return None
-
-    def _process_direct_test(self, test_info: Tuple[int, str]) -> Optional[Dict]:
-        """Run solver binary directly on a test file and extract coverage"""
-        test_id, test_name = test_info
-
-        if test_name in self.skip_tests:
-            print(f"  {test_name} - skipped (in skip list)")
-            sys.stdout.flush()
-            return None
-
-        try:
-            for gcda in self.build_dir.rglob("*.gcda"):
-                gcda.unlink()
-            self.reset_coverage_counters()
-
-            test_file = self.test_dir / test_name
-            if not test_file.exists():
-                print(f"  {test_name} - test file not found")
-                sys.stdout.flush()
-                return None
-
-            cmd = [str(self.solver_binary)] + self.solver_test_flags + [str(test_file)]
-
-            start_time = time.time()
-            try:
-                result = subprocess.run(
-                    cmd, cwd=self.build_dir,
-                    capture_output=True, text=True, check=False,
-                    timeout=self.test_timeout
-                )
-            except subprocess.TimeoutExpired:
-                print(f"  {test_name} - timeout after {self.test_timeout}s (skipping)")
-                sys.stdout.flush()
-                return None
-
-            end_time = time.time()
-            execution_time = round(end_time - start_time, 2)
-
-            if result.returncode != 0:
-                print(f"  {test_name} - failed (exit {result.returncode}) - {execution_time}s")
-                sys.stdout.flush()
-                return None
-
-            coverage_data = self.extract_coverage_data(test_name)
-            if coverage_data:
-                print(f"  {test_name} - {len(coverage_data['functions'])} functions - {execution_time}s")
-            else:
-                print(f"  {test_name} - no coverage data - {execution_time}s")
-            sys.stdout.flush()
-            self.cleanup_memory()
-            return coverage_data
-
-        except Exception as e:
-            print(f"  {test_name} - unexpected error: {e} (skipping)")
-            sys.stdout.flush()
-            return None
-
-    def _process_ctest_test(self, test_info: Tuple[int, str]) -> Optional[Dict]:
-        """Run a test via ctest and extract coverage"""
-        test_id, test_name = test_info
-
-        try:
-            for gcda in self.build_dir.rglob("*.gcda"):
-                gcda.unlink()
-            self.reset_coverage_counters()
-
-            start_time = time.time()
-
-            try:
-                result = subprocess.run(
-                    ["ctest", "-I", f"{test_id},{test_id}", "-j4", "--output-on-failure"],
-                    cwd=self.build_dir, capture_output=True, text=True, check=False,
-                    timeout=self.test_timeout
-                )
-            except subprocess.TimeoutExpired:
-                print(f"  {test_name} - timeout after {self.test_timeout}s (skipping)")
-                sys.stdout.flush()
-                return None
-
-            end_time = time.time()
-            execution_time = round(end_time - start_time, 2)
-
-            if result.returncode != 0:
-                print(f"  {test_name} - failed - {execution_time}s")
-                return None
-
-            coverage_data = self.extract_coverage_data(test_name)
-            if coverage_data:
-                print(f"  {test_name} - {len(coverage_data['functions'])} functions - {execution_time}s")
-            else:
-                print(f"  {test_name} - no coverage data - {execution_time}s")
-            sys.stdout.flush()
-            self.cleanup_memory()
-            return coverage_data
-
-        except Exception as e:
-            print(f"  {test_name} - unexpected error: {e} (skipping)")
-            sys.stdout.flush()
-            return None
+        return None
 
     def _process_manifest_test(self, test_info: Tuple) -> Optional[Dict]:
         """Run solver binary with per-manifest-entry flags and extract coverage."""
