@@ -5,7 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts/solvers/cvc5/gen_test_manifest.py"
-FIXTURE = REPO_ROOT / "tests/fixtures/cvc5"
+FIXTURE = REPO_ROOT / "tests/fixtures/cvc5" / "test" / "regress" / "cli"
 
 
 def run_script(test_dir: Path) -> list:

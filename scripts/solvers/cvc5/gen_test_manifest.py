@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 CVC5 test manifest generator.
-Parses test/regress/cli/CMakeLists.txt variable lists.
+Parses CMakeLists.txt in the test/regress/cli/ directory.
 
-Usage: gen_test_manifest.py <cvc5_source_dir>
+Usage: gen_test_manifest.py <cvc5_test_regress_cli_dir>
+  Where <cvc5_test_regress_cli_dir> is the path to test/regress/cli/ within cvc5 source.
 Output: [{"file": "arith/add.smt2", "flags": []}]
   (paths relative to test/regress/cli/)
 """
@@ -22,11 +23,11 @@ def parse_cmake_test_lists(cmake_file: Path) -> list:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: gen_test_manifest.py <cvc5_source_dir>", file=sys.stderr)
+        print("Usage: gen_test_manifest.py <cvc5_test_regress_cli_dir>", file=sys.stderr)
         sys.exit(1)
 
     source_dir = Path(sys.argv[1])
-    cmake_file = source_dir / "test" / "regress" / "cli" / "CMakeLists.txt"
+    cmake_file = source_dir / "CMakeLists.txt"
 
     if not cmake_file.exists():
         print(f"Error: CMakeLists.txt not found: {cmake_file}", file=sys.stderr)

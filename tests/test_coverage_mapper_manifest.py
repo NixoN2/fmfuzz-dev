@@ -104,3 +104,23 @@ def test_process_tests_handles_3_tuple(tmp_path):
     mock.assert_called_once()
     call_arg = mock.call_args[0][0]
     assert call_arg == (1, "solver/bv/add.smt2", [])
+
+
+def test_resolve_base_dir_uses_test_dir_when_set(tmp_path):
+    """When test_dir is set (external repo like z3), use it directly."""
+    build_dir = tmp_path / "z3" / "build"
+    build_dir.mkdir(parents=True)
+    external_test_dir = tmp_path / "z3test"
+    mapper = make_mapper(build_dir, test_dir=str(external_test_dir))
+    result = mapper._resolve_manifest_base_dir()
+    assert result == external_test_dir
+
+
+def test_resolve_base_dir_uses_build_parent_plus_subdir(tmp_path):
+    """When test_dir is None, use build_dir.parent + test_subdir."""
+    build_dir = tmp_path / "cvc5" / "build"
+    build_dir.mkdir(parents=True)
+    mapper = make_mapper(build_dir, test_dir=None)
+    mapper.cov_config["test_subdir"] = "test/regress/cli"
+    result = mapper._resolve_manifest_base_dir()
+    assert result == (tmp_path / "cvc5" / "test" / "regress" / "cli")
