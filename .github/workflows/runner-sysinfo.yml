@@ -1,0 +1,19 @@
+name: Runner System Info
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sysinfo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: System info
+        run: |
+          echo "=== OS ==="
+          cat /etc/os-release
+          echo "=== CPU ==="
+          lscpu
+          echo "=== Memory ==="
+          free -h
+          echo "=== Disk ==="
+          df -h /
