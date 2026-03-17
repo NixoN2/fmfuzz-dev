@@ -140,13 +140,14 @@ def verify_commit_is_newer(repo_url: str, newer_commit: str, older_commit: str, 
             print(f"   ⚠️  Could not get commit dates for verification, assuming correct order", file=sys.stderr)
             return True
         
-        # Verify newer_commit is actually newer
-        if newer_date <= older_date:
+        # Verify newer_commit is actually newer (allow equal timestamps: same-second commits
+        # are ordered by GitHub's API response position, which is authoritative)
+        if newer_date < older_date:
             print(f"   ❌ VALIDATION FAILED: {newer_commit[:8]} ({newer_date}) is NOT newer than {older_commit[:8]} ({older_date})", file=sys.stderr)
-            print(f"   ❌ Date difference: {older_date - newer_date if newer_date < older_date else newer_date - older_date}", file=sys.stderr)
+            print(f"   ❌ Date difference: {older_date - newer_date}", file=sys.stderr)
             return False
-        
-        print(f"   ✅ Validation passed: {newer_commit[:8]} ({newer_date}) is newer than {older_commit[:8]} ({older_date})")
+
+        print(f"   ✅ Validation passed: {newer_commit[:8]} ({newer_date}) is newer than or equal to {older_commit[:8]} ({older_date})")
         print(f"   ✅ Date difference: {newer_date - older_date}")
         return True
     except Exception as e:
