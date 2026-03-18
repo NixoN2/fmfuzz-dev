@@ -81,12 +81,9 @@ jobs:
           TEST_TYPE="${{ steps.config.outputs.test_type }}"
           TEST_REPO_DIR="${{ steps.config.outputs.test_repo_dir }}"
 
-          ARGS="--solver $SOLVER"
-          if [ "$TEST_TYPE" = "ctest" ]; then
-            ARGS="$ARGS --build-dir $SOLVER/build"
-          fi
+          ARGS="--solver $SOLVER --build-dir $SOLVER/build --solver-dir $SOLVER"
           if [ -n "$TEST_REPO_DIR" ]; then
-            ARGS="$ARGS --test-dir $TEST_REPO_DIR --solver-dir $SOLVER"
+            ARGS="$ARGS --test-dir $TEST_REPO_DIR"
           fi
 
           python3 scripts/coverage/count_tests.py $ARGS --output test-count.json
